@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="ShieOrange 神盾橘 Logo">
+  <defs>
+    <!-- Vibrant tangerine shield gradient -->
+    <linearGradient id="orangeBody" x1="20%" y1="10%" x2="85%" y2="95%">
+      <stop offset="0%" stop-color="#FFB830"/>
+      <stop offset="48%" stop-color="#FF7A00"/>
+      <stop offset="100%" stop-color="#E04F00"/>
+    </linearGradient>
+
+    <!-- Lighter inner citrus glow -->
+    <linearGradient id="orangeInner" x1="25%" y1="15%" x2="80%" y2="85%">
+      <stop offset="0%" stop-color="#FFD06B" stop-opacity="0.55"/>
+      <stop offset="60%" stop-color="#FF8C1A" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#C93F00" stop-opacity="0.28"/>
+    </linearGradient>
+
+    <!-- Shield rim highlight -->
+    <linearGradient id="rimGrad" x1="15%" y1="0%" x2="85%" y2="100%">
+      <stop offset="0%" stop-color="#FFE4A3"/>
+      <stop offset="50%" stop-color="#FF9A2E"/>
+      <stop offset="100%" stop-color="#B83B00"/>
+    </linearGradient>
+
+    <!-- Fresh citrus leaf gradient -->
+    <linearGradient id="leafGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6FE36B"/>
+      <stop offset="55%" stop-color="#2BB656"/>
+      <stop offset="100%" stop-color="#17823B"/>
+    </linearGradient>
+
+    <!-- Stem gradient -->
+    <linearGradient id="stemGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8C5A2B"/>
+      <stop offset="100%" stop-color="#593515"/>
+    </linearGradient>
+
+    <!-- Subtle drop shadow -->
+    <filter id="softShadow" x="-12%" y="-10%" width="124%" height="128%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#7A2900" flood-opacity="0.24"/>
+    </filter>
+
+    <clipPath id="shieldClip">
+      <path d="M256 104 C318 104 374 118 412 138 C422 143 428 154 428 166 L428 242 C428 342 356 418 267 458 C260 461 252 461 245 458 C156 418 84 342 84 242 L84 166 C84 154 90 143 100 138 C138 118 194 104 256 104 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Stem at top center -->
+  <path d="M256 112 C255 82 250 62 238 46" fill="none" stroke="url(#stemGrad)" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Citrus leaf sprouting from stem -->
+  <path d="M256 96 C268 54 316 32 362 48 C346 92 302 114 256 96 Z" fill="url(#leafGrad)"/>
+  <path d="M262 92 C292 74 320 62 346 53" fill="none" stroke="#B7F7B2" stroke-width="4.5" stroke-linecap="round" opacity="0.8"/>
+
+  <!-- Small secondary leaf on left -->
+  <path d="M248 96 C230 68 198 58 172 72 C188 98 220 108 248 96 Z" fill="url(#leafGrad)" opacity="0.92"/>
+
+  <!-- Shield-shaped Orange Body -->
+  <g filter="url(#softShadow)">
+    <!-- Outer shield rim -->
+    <path d="M256 104 C318 104 374 118 412 138 C422 143 428 154 428 166 L428 242 C428 342 356 418 267 458 C260 461 252 461 245 458 C156 418 84 342 84 242 L84 166 C84 154 90 143 100 138 C138 118 194 104 256 104 Z"
+          fill="url(#orangeBody)" stroke="url(#rimGrad)" stroke-width="10"/>
+
+    <g clip-path="url(#shieldClip)">
+      <!-- Right-half subtle bevel shading (heraldic shield split) -->
+      <path d="M256 104 L436 104 L436 470 L256 470 Z" fill="#C43E00" opacity="0.12"/>
+
+      <!-- Inner citrus pith ring following the shield contour -->
+      <path d="M256 128 C308 128 356 140 390 158 C397 162 402 169 402 178 L402 242 C402 327 341 393 263 430 C259 432 253 432 249 430 C171 393 110 327 110 242 L110 178 C110 169 115 162 122 158 C156 140 204 128 256 128 Z"
+            fill="url(#orangeInner)" stroke="#FFF3D6" stroke-width="7" opacity="0.72"/>
+
+      <!-- Minimal geometric citrus slice segments centered inside shield -->
+      <g stroke="#FFF6E0" stroke-width="6.5" stroke-linecap="round" opacity="0.58">
+        <line x1="256" y1="146" x2="256" y2="412"/>
+        <line x1="132" y1="258" x2="380" y2="258"/>
+        <line x1="162" y1="176" x2="350" y2="348"/>
+        <line x1="350" y1="176" x2="162" y2="348"/>
+      </g>
+
+      <!-- Clean central citrus core / shield emblem -->
+      <circle cx="256" cy="258" r="24" fill="#FFF4D6" opacity="0.92"/>
+      <circle cx="256" cy="258" r="12" fill="#FF8400"/>
+
+      <!-- Subtle orange peel pores texture accents -->
+      <g fill="#FFE8B5" opacity="0.38">
+        <circle cx="144" cy="186" r="4"/>
+        <circle cx="164" cy="170" r="3"/>
+        <circle cx="136" cy="212" r="3.5"/>
+        <circle cx="366" cy="196" r="3.5"/>
+        <circle cx="376" cy="222" r="3"/>
+      </g>
+
+      <!-- Glossy top-left specular highlight -->
+      <path d="M122 170 C156 150 202 139 246 138 C210 154 166 178 134 218 C125 202 121 186 122 170 Z"
+            fill="#FFFFFF" opacity="0.28"/>
+    </g>
+  </g>
+</svg>
