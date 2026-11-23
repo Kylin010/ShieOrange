@@ -1116,30 +1116,44 @@ class GuardEngine:
         )
 
     async def resolve_anon_admin_input_uid(self, bot: Any, chat_id: int) -> Optional[int]:
-        """Match an anonymous admin's group reply to an active pending GUI text input in that group."""
+        """Match an anonymous admin's group reply ONLY when that group has a single unambiguous anonymous admin."""
         now = time.time()
-        candidate_uids = [
-            uid
-            for (pcid, uid), entry in self.pending_admin_input.items()
-            if pcid == chat_id and entry.target_group_id == chat_id and entry.expires_at >= now
-        ]
-        if not candidate_uids:
+        has_active = any(
+            pcid == chat_id and entry.target_group_id == chat_id and entry.expires_at >= now
+            for (pcid, _uid), entry in self.pending_admin_input.items()
+        )
+        if not has_active:
             return None
         try:
             admins = await bot.get_chat_administrators(chat_id)
         except TelegramError:
             return None
         anon_admins = [m for m in admins if getattr(m, "is_anonymous", False) and getattr(m, "user", None)]
-        if not anon_admins:
+        # Strict anti-collision guard: if 2+ anonymous admins exist, Telegram cannot distinguish who spoke!
+        if len(anon_admins) != 1:
             return None
-        # Security: ensure ALL anonymous admins in this group hold restrict rights (no privilege escalation)
-        if not all(_extract_member_rights(m).satisfies(require_restrict=True) for m in anon_admins):
+        sole = anon_admins[0]
+        if not _extract_member_rights(sole).satisfies(require_restrict=True):
             return None
-        anon_uid_set = {m.user.id for m in anon_admins}
-        for uid in candidate_uids:
-            if uid in anon_uid_set:
-                return uid
+        entry = self.pending_admin_input.get((chat_id, sole.user.id))
+        if entry and entry.target_group_id == chat_id and entry.expires_at >= now:
+            return sole.user.id
         return None
+
+    async def is_ambiguous_anon_admin(self, bot: Any, chat_id: int, user_id: int) -> bool:
+        """Return True if user_id is an anonymous admin in a group with 2+ anonymous admins."""
+        if not hasattr(bot, "get_chat_administrators"):
+            return False
+        try:
+            admins = await bot.get_chat_administrators(chat_id)
+        except TelegramError:
+            return False
+        anon_uids = [
+            m.user.id
+            for m in admins
+            if getattr(m, "is_anonymous", False) and getattr(m, "user", None)
+        ]
+        return len(anon_uids) > 1 and user_id in anon_uids
 
     async def get_profile(self, bot: Any, user: Any) -> dict[str, Any]:
         if not user:

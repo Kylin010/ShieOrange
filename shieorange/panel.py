@@ -1968,6 +1968,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         toast = f"群内播报已{'开启' if gs.announce_in_group else '设为静默'}"
     elif action in ("announce_menu", "an_cancel"):
         engine.clear_admin_input_state(panel_chat_id, user.id)
+        engine.clear_admin_input_state(user.id, user.id)
         await query.answer("已取消输入" if action == "an_cancel" else "已打开封禁播报设置")
         text, markup = build_announce_view(engine, gs)
         try:
@@ -1987,6 +1988,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "an_preview",
     ):
         engine.clear_admin_input_state(panel_chat_id, user.id)
+        engine.clear_admin_input_state(user.id, user.id)
         notice = ""
         if action == "an_toggle":
             gs.announce_in_group = not gs.announce_in_group
@@ -2027,10 +2029,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             pass
         return
     elif action in ("an_ask_tpl", "an_ask_delay"):
-        if panel_chat and panel_chat.type == ChatType.PRIVATE:
-            engine.clear_owner_input_state(user.id)
         field = "announce_template" if action == "an_ask_tpl" else "announce_delete_seconds"
-        engine.set_admin_input_state(panel_chat_id, user.id, cid, field, panel_msg_id)
         if field == "announce_template":
             prompt_text = (
                 f"✏️ 请直接在本聊天发送新的群内封禁提示文案（5 分钟内有效，最多 {ANNOUNCE_MAX_TEMPLATE_LEN} 字）：\n\n"
@@ -2055,6 +2054,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         cancel_kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("❌ 取消输入", callback_data=f"cfg:an_cancel:{cid}")]]
         )
+
+        # Anti-collision guard: when a group has 2+ anonymous admins, Telegram hides which anonymous admin spoke.
+        # Route the text input to the clicking admin's personal DM instead of accepting ambiguous group input!
+        if (
+            panel_chat
+            and panel_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+            and await engine.is_ambiguous_anon_admin(context.bot, cid, user.id)
+        ):
+            dm_prompt = f"📌 群组：{gs.chat_title or cid}\n\n{prompt_text}"
+            try:
+                sent_dm = await context.bot.send_message(user.id, dm_prompt, reply_markup=cancel_kb)
+                dm_mid = getattr(sent_dm, "message_id", None)
+                engine.clear_owner_input_state(user.id)
+                engine.clear_admin_input_state(panel_chat_id, user.id)
+                engine.set_admin_input_state(
+                    user.id, user.id, cid, field, dm_mid if isinstance(dm_mid, int) else None
+                )
+                notice = (
+                    "🔒 检测到本群有多位匿名管理员，为防止群内发言串改配置，已将输入框发送到你的私聊，"
+                    "请在与机器人的私聊中直接回复。"
+                )
+                await query.answer("已转至私聊输入（防多匿名管串改）", show_alert=True)
+            except TelegramError:
+                engine.clear_admin_input_state(panel_chat_id, user.id)
+                bot_uname = getattr(getattr(context, "bot", None), "username", "") or ""
+                dm_tip = f"https://t.me/{bot_uname}" if bot_uname else "机器人私聊"
+                notice = (
+                    f"🔒 本群有多位匿名管理员，为防止群内发言串改配置，请先前往 {dm_tip} 发送 /start 开启私聊，"
+                    "再回到此处点击修改（或直接在私聊面板修改）。"
+                )
+                await query.answer("请先私聊机器人 /start 后再修改", show_alert=True)
+            text, markup = build_announce_view(engine, gs, notice=notice)
+            try:
+                await query.edit_message_text(text, reply_markup=markup)
+            except TelegramError:
+                pass
+            return
+
+        if panel_chat and panel_chat.type == ChatType.PRIVATE:
+            engine.clear_owner_input_state(user.id)
+        engine.set_admin_input_state(panel_chat_id, user.id, cid, field, panel_msg_id)
         await query.answer("请直接发送内容")
         try:
             await query.edit_message_text(prompt_text, reply_markup=cancel_kb)

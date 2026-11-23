@@ -2316,6 +2316,67 @@ class TestSecurityReviewRegressions(unittest.TestCase):
             asyncio.run(cmd_config(SimpleNamespace(message=m_ext_cfg, effective_user=ch_bot_user), ctx_ok))
             m_ext_cfg.reply_text.assert_not_called()
 
+            # 5. Anti-collision guard with 2+ full-rights anonymous admins:
+            #    (a) Even if group input was pending, resolve_anon_admin_input_uid returns None so
+            #        Admin B's anonymous chat can NEVER hijack Admin A's pending config!
+            #    (b) Clicking an_ask_tpl in group routes the input prompt to Admin A's personal DM!
+            from shieorange.panel import handle_callback
+            from telegram.error import Forbidden
+
+            anon_admin_b = SimpleNamespace(
+                status="administrator",
+                user=SimpleNamespace(id=5699),
+                is_anonymous=True,
+                can_delete_messages=True,
+                can_restrict_members=True,
+            )
+            bot_only_creator.get_chat_administrators = AsyncMock(return_value=[anon_creator, anon_admin_b])
+            bot_only_creator.get_chat_member = AsyncMock(return_value=anon_creator)
+            bot_only_creator.send_message = AsyncMock(return_value=SimpleNamespace(message_id=501))
+
+            # (a) Race condition: group pending input exists for 5689, Admin B chats anonymously -> ignored!
+            gs_before = eng.get_group_settings(-1001).announce_template
+            eng.set_admin_input_state(-1001, 5689, -1001, "announce_template", panel_msg_id=14)
+            m_b_chat = SimpleNamespace(
+                chat=group_sender,
+                message_id=21,
+                from_user=anon_user,
+                sender_chat=group_sender,
+                text="管理员B的普通群聊发言",
+                reply_text=AsyncMock(),
+            )
+            asyncio.run(handle_group_admin_input(SimpleNamespace(message=m_b_chat, effective_user=anon_user), ctx_ok))
+            self.assertEqual(eng.get_group_settings(-1001).announce_template, gs_before)
+            self.assertIn((-1001, 5689), eng.pending_admin_input)
+
+            # (b) Clicking an_ask_tpl in group routes cleanly to Admin A's DM (5689, 5689), NOT group (-1001, 5689)!
+            q_ask = SimpleNamespace(
+                data="cfg:an_ask_tpl:-1001",
+                from_user=SimpleNamespace(id=5689, full_name="OwnerA"),
+                message=SimpleNamespace(chat=group_sender, message_id=14),
+                answer=AsyncMock(),
+                edit_message_text=AsyncMock(),
+            )
+            asyncio.run(handle_callback(SimpleNamespace(callback_query=q_ask), ctx_ok))
+            bot_only_creator.send_message.assert_awaited_once()
+            self.assertEqual(bot_only_creator.send_message.call_args.args[0], 5689)
+            self.assertNotIn((-1001, 5689), eng.pending_admin_input)
+            self.assertIn((5689, 5689), eng.pending_admin_input)
+
+            # (c) If Admin A hasn't started DM (Forbidden), refuse to set group pending input!
+            eng.clear_admin_input_state(5689, 5689)
+            bot_only_creator.send_message = AsyncMock(side_effect=Forbidden("bot was blocked"))
+            q_ask2 = SimpleNamespace(
+                data="cfg:an_ask_delay:-1001",
+                from_user=SimpleNamespace(id=5689, full_name="OwnerA"),
+                message=SimpleNamespace(chat=group_sender, message_id=14),
+                answer=AsyncMock(),
+                edit_message_text=AsyncMock(),
+            )
+            asyncio.run(handle_callback(SimpleNamespace(callback_query=q_ask2), ctx_ok))
+            self.assertNotIn((-1001, 5689), eng.pending_admin_input)
+            self.assertNotIn((5689, 5689), eng.pending_admin_input)
+
 
 class TestCoreFeatures(unittest.TestCase):
     def test_album_deduplication_and_flood(self) -> None:

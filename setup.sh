@@ -885,8 +885,8 @@ run_cli_subcommand() {
     restart)
       require_compose_or_exit
       if is_container_running; then
-        (cd "$WORK_DIR" && "${COMPOSE_CMD[@]}" restart)
-        printf '%s神盾橘已重启！%s\n' "$C_CYAN_BOLD" "$C_RESET"
+        (cd "$WORK_DIR" && "${COMPOSE_CMD[@]}" up -d --force-recreate shieorange)
+        printf '%s神盾橘已重建并重启（已重新加载 .env 配置）！%s\n' "$C_CYAN_BOLD" "$C_RESET"
       else
         (cd "$WORK_DIR" && "${COMPOSE_CMD[@]}" up -d --build)
         printf '%s神盾橘已启动！%s\n' "$C_CYAN_BOLD" "$C_RESET"
@@ -905,12 +905,14 @@ run_cli_subcommand() {
         exit 1
       fi
       if ! verify_git_remote "$WORK_DIR"; then
-        printf '❌ 目录 %s 的 Git 远端与官方仓库不匹配，已中止自动拉取。\n' "$WORK_DIR" >&2
+        printf '❌ 目录 %s 缺少有效的 Git 远端元数据（例如早期通过压缩包部署，或远端与官方仓库不匹配），无法执行 git pull。\n' "$WORK_DIR" >&2
+        printf '   💡 若为旧版/压缩包安装迁移至最新公开版，请按 README「旧版/压缩包迁移」保留 .env 与 data/ 后重新克隆并执行 bash setup.sh --install-cli。\n' >&2
         exit 1
       fi
       printf '%s正在拉取 ShieOrange 最新代码...%s\n' "$C_CYAN" "$C_RESET"
       if ! git -C "$WORK_DIR" pull --ff-only; then
-        printf '❌ 拉取更新失败，请检查本地 git 状态后重试。\n' >&2
+        printf '❌ 拉取更新失败（若为公开发布前的旧克隆，因历史已重置，git pull --ff-only 会拒绝快进）。\n' >&2
+        printf '   💡 请备份当前目录的 .env 与 data/ 后重新克隆最新公开仓库，或参阅 README「旧版/压缩包迁移」说明。\n' >&2
         exit 1
       fi
       if ! verify_shieorange_dir "$WORK_DIR"; then
@@ -1319,7 +1321,7 @@ install_cli_shortcut
 # ---- Optionally launch Docker Compose ----
 if (( ${#COMPOSE_CMD[@]} > 0 )); then
   if [[ -z "$DO_START" || "$DO_START" =~ ^[Yy]$ ]]; then
-    (cd "$WORK_DIR" && "${COMPOSE_CMD[@]}" up -d --build)
+    (cd "$WORK_DIR" && "${COMPOSE_CMD[@]}" up -d --build --force-recreate)
     printf '\n'
     box_top
     box_center "神盾橘已启动" "${C_YELLOW_BOLD}神盾橘已启动${C_RESET}"
