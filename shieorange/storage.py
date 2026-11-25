@@ -185,6 +185,21 @@ class Storage:
                 cached_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (day, chat_id)
             );
+
+            CREATE TABLE IF NOT EXISTS forwarded_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                origin_desc TEXT NOT NULL,
+                origin_user_id INTEGER,
+                origin_profile_json TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                raw_payload_json TEXT NOT NULL,
+                xray_summary TEXT NOT NULL,
+                vision_attached INTEGER NOT NULL DEFAULT 0,
+                ai_score INTEGER NOT NULL DEFAULT -1,
+                ai_reason TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
             """
         )
         self.conn.commit()
@@ -860,3 +875,62 @@ class Storage:
                 """
             )
         self.conn.commit()
+
+    def save_forwarded_sample(
+        self,
+        *,
+        owner_id: int,
+        origin_desc: str,
+        origin_user_id: Optional[int],
+        origin_profile: dict[str, Any],
+        media_type: str,
+        raw_payload: dict[str, Any],
+        xray_summary: str,
+        vision_attached: bool,
+        ai_score: int,
+        ai_reason: str,
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO forwarded_samples (
+                owner_id, origin_desc, origin_user_id, origin_profile_json,
+                media_type, raw_payload_json, xray_summary, vision_attached,
+                ai_score, ai_reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                owner_id,
+                origin_desc[:300],
+                origin_user_id,
+                json.dumps(origin_profile, ensure_ascii=False)[:2000],
+                media_type[:120],
+                json.dumps(raw_payload, ensure_ascii=False)[:6000],
+                xray_summary[:4000],
+                int(vision_attached),
+                int(ai_score),
+                (ai_reason or "")[:400],
+                time.time(),
+            ),
+        )
+        sample_id = int(cur.lastrowid or 0)
+        cnt_row = self.conn.execute("SELECT COUNT(*) AS c FROM forwarded_samples").fetchone()
+        if cnt_row and int(cnt_row["c"]) > 220:
+            self.conn.execute(
+                """
+                DELETE FROM forwarded_samples
+                WHERE id NOT IN (SELECT id FROM forwarded_samples ORDER BY id DESC LIMIT 200)
+                """
+            )
+        self.conn.commit()
+        return sample_id
+
+    def list_forwarded_samples(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM forwarded_samples
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, min(100, limit)),),
+        ).fetchall()
+        return [dict(r) for r in rows]

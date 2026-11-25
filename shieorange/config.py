@@ -61,6 +61,7 @@ class AppConfig:
     ai_concurrency: int = int(os.getenv("AI_CONCURRENCY", "5"))
 
     db_path: str = os.getenv("DB_PATH", "data/shieorange.db").strip()
+    cas_api_key: str = os.getenv("CAS_API_KEY", "").strip()
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
     def validate(self) -> None:

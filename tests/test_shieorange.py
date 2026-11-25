@@ -2377,6 +2377,181 @@ class TestSecurityReviewRegressions(unittest.TestCase):
             self.assertNotIn((-1001, 5689), eng.pending_admin_input)
             self.assertNotIn((5689, 5689), eng.pending_admin_input)
 
+    def test_31_obfuscated_promo_nickname_cas_401_and_dm_forward_diagnostics(self) -> None:
+        """Verify obfuscated promo-bait nicknames + single-digit bait ban cleanly, CAS 401 circuit-breaks,
+        extended media types avoid '(空消息)', and owner DM forwarded samples are diagnosed & archived."""
+        from shieorange.llm import SpamVerdict
+        from shieorange.panel import handle_private_owner_input
+        from shieorange.xray import deobfuscate_profile_text, inspect_raw_message_fields
+
+        # 1. Obfuscated promo nickname de-obfuscation & additive scoring
+        for raw_name in [
+            "-点-简界*·看·橡·-木",
+            "好*路·子-在-朱*叶·稳",
+            "🔥*抖音1代2刷🔥",
+            "·副·业看·简界·曰3K",
+        ]:
+            _, _, is_obf = deobfuscate_profile_text(raw_name)
+            self.assertTrue(is_obf, msg=f"expected obfuscation hit for {raw_name}")
+            flags, boost, is_max = analyze_profile_risk(
+                {"full_name": raw_name, "username": "(无)", "bio": "", "personal_channel": "", "has_photo": True},
+                clean_count=0,
+            )
+            self.assertGreaterEqual(boost, 30, msg=f"boost too low for {raw_name}: {flags}")
+            self.assertTrue(is_max, msg=f"expected max_risk for {raw_name}")
+
+        # Normal nicknames must stay at +0 boost (zero false positives)
+        for normal_name in ["Kylin-010", "王小明", "Linux_Dev", "广州-张三"]:
+            flags, boost, is_max = analyze_profile_risk(
+                {"full_name": normal_name, "username": "@devuser", "bio": "VPS玩家", "personal_channel": "", "has_photo": True},
+                clean_count=0,
+            )
+            self.assertEqual(boost, 0, msg=f"unexpected boost for normal user {normal_name}: {flags}")
+            self.assertFalse(is_max)
+
+        # 2. Live pipeline test: '-点-简界*·看·橡·-木' sends '5' with spam_score=85 and hesitant AI=57 -> BANNED!
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Storage(str(Path(tmp) / "t.db"))
+            try:
+                cfg = AppConfig(telegram_bot_token="123456:TESTTOKEN", ai_api_key="sk-test", owner_ids={5689})
+                llm = UniversalAIClient("sk-test", "https://api.deepseek.com/v1", "deepseek-flash")
+                llm.classify = AsyncMock(
+                    return_value=SpamVerdict(
+                        is_spam=False, score=57, reason="单字5，昵称疑似引流", used_vision=False
+                    )
+                )
+                eng = GuardEngine(cfg, db, llm)
+                gs = eng.get_group_settings(-1001, "TestGrp")
+                gs.spam_score = 85
+                gs.cas_enabled = False
+                gs.announce_in_group = False
+                db.save_group(gs)
+
+                spam_user = SimpleNamespace(id=7525595504, full_name="-点-简界*·看·橡·-木", username=None, is_bot=False)
+                bot = SimpleNamespace(
+                    id=111,
+                    get_chat_administrators=AsyncMock(return_value=[]),
+                    get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member")),
+                    get_chat=AsyncMock(
+                        return_value=SimpleNamespace(photo=object(), bio="", personal_chat=None)
+                    ),
+                    delete_message=AsyncMock(),
+                    ban_chat_member=AsyncMock(),
+                    send_message=AsyncMock(),
+                )
+                grp_chat = SimpleNamespace(id=-1001, title="TestGrp", type="supergroup")
+                msg_bait = SimpleNamespace(
+                    chat=grp_chat,
+                    message_id=99,
+                    from_user=spam_user,
+                    sender_chat=None,
+                    text="5",
+                    caption=None,
+                    entities=[],
+                    caption_entities=[],
+                    media_group_id=None,
+                    reply_to_message=None,
+                    reply_markup=None,
+                    via_bot=None,
+                    external_reply=None,
+                    quote=None,
+                    forward_origin=None,
+                    link_preview_options=None,
+                    poll=None,
+                    story=None,
+                    paid_media=None,
+                    photo=None,
+                    sticker=None,
+                    video=None,
+                    video_note=None,
+                    animation=None,
+                    voice=None,
+                    audio=None,
+                    document=None,
+                    contact=None,
+                    venue=None,
+                    location=None,
+                    dice=None,
+                    game=None,
+                )
+                ctx = SimpleNamespace(bot=bot, application=SimpleNamespace(bot_data={"engine": eng}))
+                asyncio.run(eng.handle_message(SimpleNamespace(message=msg_bait, edited_message=None), ctx))
+                # 57 + 32 = 89 >= 85 -> permanently banned!
+                bot.ban_chat_member.assert_awaited_once_with(-1001, 7525595504, revoke_messages=True)
+                # Verify prompt sent to AI included de-obfuscated nickname + bait exposure warning
+                sent_summary = llm.classify.call_args.kwargs["summary_text"]
+                self.assertIn("点简界看橡木", sent_summary)
+                self.assertIn("蹭曝光", sent_summary)
+
+                # 3. Extended media extraction prevents '(空消息)' on contact / voice / video_note / animated sticker
+                msg_contact = SimpleNamespace(
+                    text=None, caption=None, entities=[], caption_entities=[],
+                    contact=SimpleNamespace(first_name="招代理", last_name="", phone_number="+852123456"),
+                )
+                x_contact = extract_xray(msg_contact)
+                self.assertIn("分享名片", x_contact.build_preview())
+                msg_vsticker = SimpleNamespace(
+                    text=None, caption=None, entities=[], caption_entities=[],
+                    sticker=SimpleNamespace(is_animated=False, is_video=True, thumbnail=None, emoji="🔥", set_name="adset"),
+                )
+                x_vs = extract_xray(msg_vsticker)
+                self.assertIn("kind=video, thumb=no", x_vs.sticker_info)
+                raw_vs = inspect_raw_message_fields(msg_vsticker)
+                self.assertTrue(raw_vs["sticker"]["is_video"])
+                self.assertFalse(raw_vs["sticker"]["has_thumbnail"])
+
+                # 4. CAS 401 circuit breaker: hits API once, pauses subsequent calls
+                cas = CASChecker(auth_cooldown_seconds=3600)
+                mock_http = SimpleNamespace(
+                    is_closed=False,
+                    get=AsyncMock(return_value=SimpleNamespace(status_code=401, json=lambda: {"ok": False})),
+                )
+                cas._client = mock_http
+                self.assertFalse(asyncio.run(cas.is_banned(10001, now=1000.0)))
+                self.assertFalse(asyncio.run(cas.is_banned(10002, now=1005.0)))
+                self.assertEqual(mock_http.get.await_count, 1)
+
+                # 5. Owner DM forwarded sample diagnosis saves to SQLite & replies; non-owner is ignored
+                dm_chat = SimpleNamespace(id=5689, type="private")
+                owner_u = SimpleNamespace(id=5689, full_name="Owner")
+                fwd_origin = SimpleNamespace(type="user", sender_user=spam_user)
+                m_fwd = SimpleNamespace(
+                    chat=dm_chat,
+                    message_id=200,
+                    from_user=owner_u,
+                    text="5",
+                    caption=None,
+                    entities=[],
+                    caption_entities=[],
+                    forward_origin=fwd_origin,
+                    reply_text=AsyncMock(),
+                )
+                asyncio.run(handle_private_owner_input(SimpleNamespace(message=m_fwd, effective_user=owner_u), ctx))
+                m_fwd.reply_text.assert_awaited_once()
+                reply_txt = m_fwd.reply_text.call_args.args[0]
+                self.assertIn("样本诊断 #1", reply_txt)
+                self.assertIn("92 分", reply_txt)
+                saved = db.list_forwarded_samples(limit=5)
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0]["ai_score"], 92)
+                self.assertEqual(saved[0]["origin_user_id"], 7525595504)
+
+                # Non-owner forward in DM -> completely ignored!
+                stranger = SimpleNamespace(id=99999, full_name="Stranger")
+                m_stranger_fwd = SimpleNamespace(
+                    chat=SimpleNamespace(id=99999, type="private"),
+                    message_id=201,
+                    from_user=stranger,
+                    text="5",
+                    forward_origin=fwd_origin,
+                    reply_text=AsyncMock(),
+                )
+                asyncio.run(handle_private_owner_input(SimpleNamespace(message=m_stranger_fwd, effective_user=stranger), ctx))
+                m_stranger_fwd.reply_text.assert_not_called()
+                self.assertEqual(len(db.list_forwarded_samples(limit=5)), 1)
+            finally:
+                db.conn.close()
+
 
 class TestCoreFeatures(unittest.TestCase):
     def test_album_deduplication_and_flood(self) -> None:

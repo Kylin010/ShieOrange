@@ -22,30 +22,48 @@ class CASChecker:
         error_ttl_seconds: int = 120,
         timeout: float = 2.5,
         max_cache: int = 10000,
+        api_key: str = "",
+        auth_cooldown_seconds: int = 21600,
     ):
         self.ttl = ttl_seconds
         self.error_ttl = error_ttl_seconds
         self.timeout = timeout
         self.max_cache = max_cache
+        self.api_key = (api_key or "").strip()
+        self.auth_cooldown = auth_cooldown_seconds
+        self._disabled_until: float = 0.0
         self._cache: dict[int, tuple[float, bool]] = {}
         self._client: Optional[httpx.AsyncClient] = None
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
+            headers = {"User-Agent": "ShieOrange/0.2"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
             self._client = httpx.AsyncClient(
                 timeout=self.timeout,
-                headers={"User-Agent": "ShieOrange/0.2"},
+                headers=headers,
             )
         return self._client
 
     async def is_banned(self, user_id: int, *, now: Optional[float] = None) -> bool:
         ts = now if now is not None else time.time()
+        if self._disabled_until > ts:
+            return False
         cached = self._cache.get(user_id)
         if cached and cached[0] > ts:
             return cached[1]
 
         try:
             resp = await self._get_client().get(CAS_API_URL, params={"user_id": user_id})
+            if resp.status_code in (401, 403):
+                self._disabled_until = ts + self.auth_cooldown
+                logger.warning(
+                    "CAS 接口返回 %s（当前需要 API Key 或权限受限），已自动暂停 CAS 查询 %d 小时避免刷屏与延迟。",
+                    resp.status_code,
+                    max(1, self.auth_cooldown // 3600),
+                )
+                return False
             if resp.status_code != 200:
                 logger.warning(
                     "CAS 返回非 200 状态码 (%s)，采用短期重试缓存 uid=%s",

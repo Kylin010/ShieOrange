@@ -50,7 +50,12 @@ from .llm import (
     validate_model_name,
 )
 from .storage import GroupSettings
-from .xray import extract_xray
+from .xray import (
+    analyze_profile_risk,
+    extract_image_data_url,
+    extract_xray,
+    inspect_raw_message_fields,
+)
 
 logger = logging.getLogger("shieorange.panel")
 
@@ -892,8 +897,122 @@ async def handle_group_admin_input(update: Update, context: ContextTypes.DEFAULT
             await _process_admin_config_input(update, context, override_uid=anon_uid)
 
 
+async def _diagnose_forwarded_sample(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner-only private DM diagnostic: inspect, AI-test, and archive any forwarded spam sample."""
+    engine: GuardEngine = context.application.bot_data["engine"]
+    msg = update.message
+    user = update.effective_user
+    if not msg or not user:
+        return
+
+    origin = getattr(msg, "forward_origin", None)
+    origin_user = getattr(origin, "sender_user", None) if origin else None
+    origin_uid: Optional[int] = getattr(origin_user, "id", None) if origin_user else None
+
+    # Reconstruct original sender profile as faithfully as Telegram allows
+    if origin_user is not None:
+        orig_profile = await engine.get_profile(context.bot, origin_user)
+    elif origin and getattr(origin, "sender_user_name", None):
+        orig_profile = {
+            "full_name": str(origin.sender_user_name),
+            "username": "(转发隐私隐藏)",
+            "bio": "",
+            "personal_channel": "",
+            "personal_channel_bio": "",
+            "has_photo": None,
+        }
+    else:
+        och = (getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)) if origin else None
+        orig_profile = {
+            "full_name": (getattr(och, "title", "") or "") if och else "",
+            "username": f"@{och.username}" if (och and getattr(och, "username", None)) else "(无)",
+            "bio": "",
+            "personal_channel": "",
+            "personal_channel_bio": "",
+            "has_photo": None,
+        }
+
+    xray = extract_xray(msg, is_edited=False)
+    raw_payload = inspect_raw_message_fields(msg)
+    want_vision = engine.llm.is_configured and engine.llm.vision_supported
+    image_data_url = await extract_image_data_url(context.bot, msg) if want_vision else None
+
+    summary = xray.format_for_ai(
+        profile=orig_profile,
+        recent_context=[],
+        user_fragments=[],
+        clean_count=0,
+        vision_attached=bool(image_data_url),
+    )
+    profile_flags, profile_boost, _ = analyze_profile_risk(orig_profile, clean_count=0)
+    has_promo_profile = any(("隔断混淆" in f or "引流" in f) for f in profile_flags)
+
+    raw_score = -1
+    eff_score = -1
+    ai_reason = "未配置 AI 模型（仅保存原始透视样本）"
+    used_vision = False
+    if engine.llm.is_configured:
+        try:
+            verdict = await engine.llm.classify(
+                summary_text=summary,
+                group_topic="",
+                image_data_url=image_data_url,
+                allow_vision=True,
+            )
+            raw_score = verdict.score
+            eff_score = raw_score
+            min_ai = 35 if has_promo_profile else 45
+            if profile_boost > 0 and raw_score >= min_ai:
+                eff_score = min(100, raw_score + profile_boost)
+            ai_reason = verdict.reason or "(无)"
+            used_vision = verdict.used_vision
+        except Exception as exc:
+            ai_reason = f"AI 试跑异常: {type(exc).__name__}"
+
+    origin_desc = xray.forward_from or str(getattr(origin, "type", "forwarded"))
+    sample_id = engine.storage.save_forwarded_sample(
+        owner_id=user.id,
+        origin_desc=origin_desc,
+        origin_user_id=origin_uid,
+        origin_profile=orig_profile,
+        media_type=xray.media_type or "",
+        raw_payload=raw_payload,
+        xray_summary=summary,
+        vision_attached=bool(image_data_url),
+        ai_score=eff_score,
+        ai_reason=ai_reason,
+    )
+
+    score_line = (
+        f"• AI 实测得分：{eff_score} 分（原始 {raw_score} + 画像加权 {max(0, eff_score - raw_score)}）"
+        if raw_score >= 0
+        else "• AI 实测得分：未评分"
+    )
+    flags_line = "、".join(profile_flags) if profile_flags else "无"
+    media_line = xray.media_type or ("特殊载体: " + xray.special_payload if xray.special_payload else "纯文本/无媒体")
+    vis_line = (
+        "已提取图片并送审视觉"
+        if used_vision
+        else ("已提取图片" if image_data_url else "无可用视觉图/缩略图")
+    )
+    reply = (
+        f"🔬 [神盾橘样本诊断 #{sample_id}]\n"
+        f"• 转发来源：{origin_desc}\n"
+        f"• 原始载体：{media_line} | 视觉：{vis_line}\n"
+        f"• 透视摘要：{xray.build_preview()[:260]}\n"
+        f"• 还原资料：昵称={orig_profile.get('full_name') or '(隐藏)'}"
+        f"{' | Bio=' + orig_profile['bio'][:80] if orig_profile.get('bio') else ''}"
+        f"{' | 频道=' + orig_profile['personal_channel'][:80] if orig_profile.get('personal_channel') else ''}\n"
+        f"• 画像信号：{flags_line}\n"
+        f"{score_line}\n"
+        f"• AI 判定理由：{ai_reason}\n\n"
+        f"✅ 完整 Bot API 原始结构与透视快照已存档（样本 #{sample_id}），可直接在服务器查看分析！"
+    )
+    await msg.reply_text(reply)
+
+
 async def handle_private_owner_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles guided private-chat text input for Owner AI config and DM group-panel inputs."""
+    """Handles guided private-chat input for Owner AI config, DM group-panel inputs, and forwarded spam diagnostics."""
     engine: GuardEngine = context.application.bot_data["engine"]
     msg = update.message
     user = update.effective_user
@@ -902,7 +1021,9 @@ async def handle_private_owner_input(update: Update, context: ContextTypes.DEFAU
 
     field_name = engine.pop_owner_input_state(user.id) if engine.is_owner(user.id) else None
     if not field_name:
-        await _process_admin_config_input(update, context)
+        handled_cfg = await _process_admin_config_input(update, context)
+        if not handled_cfg and engine.is_owner(user.id) and getattr(msg, "forward_origin", None) is not None:
+            await _diagnose_forwarded_sample(update, context)
         return
 
     raw_text = (msg.text or "").strip()

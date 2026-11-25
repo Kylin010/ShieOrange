@@ -430,7 +430,7 @@ class GuardEngine:
         self.cfg = cfg
         self.storage = storage
         self.llm = llm
-        self.cas = CASChecker()
+        self.cas = CASChecker(api_key=getattr(cfg, "cas_api_key", ""))
         self.captcha = SimpleCaptchaManager(storage=storage, timeout_seconds=90)
         self.flood = FloodTracker()
         self.swarm = SwarmTracker(window_seconds=60, min_distinct_actors=3)
@@ -2081,9 +2081,15 @@ class GuardEngine:
         else:
             effective_score = raw_content_score
             profile_note = ""
-            if profile_boost > 0 and raw_content_score >= 45:
+            has_promo_profile = any(("隔断混淆" in f or "引流" in f) for f in profile_flags)
+            min_ai_for_boost = 35 if has_promo_profile else 45
+            if profile_boost > 0 and raw_content_score >= min_ai_for_boost:
                 effective_score = min(100, raw_content_score + profile_boost)
-                profile_note = f"（空白号画像加权+{profile_boost}）"
+                profile_note = (
+                    f"（高危昵称/资料画像加权+{profile_boost}）"
+                    if has_promo_profile
+                    else f"（空白号画像加权+{profile_boost}）"
+                )
 
         # Repeat-send escalation for borderline messages (50 <= score < spam_score)
         repeat_extra_ids: list[int] = []

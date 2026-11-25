@@ -198,7 +198,7 @@ def main() -> None:
     app.add_handler(CommandHandler("claim", cmd_claim, filters=filters.ChatType.PRIVATE), group=0)
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+            filters.ChatType.PRIVATE & ~filters.COMMAND,
             handle_private_owner_input,
         ),
         group=0,
