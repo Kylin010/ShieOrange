@@ -103,11 +103,18 @@ def build_start_dashboard(
     td = engine.storage.get_today_metrics()
     lt = engine.storage.get_lifetime_metrics()
 
+    join_guard_on = engine.is_owner_only_join_enabled()
+    join_guard_line = (
+        "🔒 仅超管可拉群（陌生人拉入自动退群防白嫖）"
+        if join_guard_on
+        else "🔓 允许所有人拉群（已关闭防陌生人拉群）"
+    )
     bot_link_line = f"• 机器人链接：https://t.me/{bot_username}\n" if bot_username else ""
     text = (
         f"🍊🛡 欢迎使用 {__app_name_cn__} ({__app_name__}) v{__version__}\n\n"
         f"{bot_link_line}"
         f"• 防护群组：共 {len(groups_all)} 个群（已开启 {groups_on} 个）| 今日杀广告 {td['bans']} / 累计 {lt['bans']}\n"
+        f"• 拉群权限：{join_guard_line}\n"
         f"• 当前引擎：{model_display}\n"
         f"• 识图能力：{vision_line}\n"
         f"• 你的用户 ID：{user_id}\n\n"
@@ -123,12 +130,20 @@ def build_start_dashboard(
         if engine.llm.is_configured
         else "🤖 配置 AI 接口 / API Key"
     )
+    join_btn_label = (
+        "🔒 防陌生人拉群：仅超管"
+        if join_guard_on
+        else "🔓 防陌生人拉群：已放开"
+    )
     buttons: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton("📊 运行状态与战报", callback_data="stats:overview"),
             InlineKeyboardButton(ai_btn_label, callback_data="aiconf:menu"),
         ],
-        [InlineKeyboardButton("🍊 更换机器人头像 / 名称 / 简介", callback_data="brand:menu")],
+        [
+            InlineKeyboardButton("🍊 更换头像 / 简介", callback_data="brand:menu"),
+            InlineKeyboardButton(join_btn_label, callback_data="aiconf:toggle_join_guard"),
+        ],
     ]
     for gs in groups_all[:8]:
         buttons.append(
@@ -1540,6 +1555,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if sub == "back":
             engine.clear_owner_input_state(user.id)
             await query.answer()
+            bot_uname = getattr(getattr(context, "bot", None), "username", "") or ""
+            text, markup = build_start_dashboard(engine, user.id, bot_username=bot_uname)
+            try:
+                await query.edit_message_text(text, reply_markup=markup)
+            except TelegramError:
+                pass
+            return
+
+        if sub == "toggle_join_guard":
+            engine.clear_owner_input_state(user.id)
+            new_state = not engine.is_owner_only_join_enabled()
+            engine.set_owner_only_join(new_state)
+            toast = (
+                "已开启「仅超管可拉群」：非超管拉入新群将自动退群并私聊告警"
+                if new_state
+                else "已关闭「仅超管可拉群」：允许他人拉入新群（仍受 ALLOWED_GROUP_IDS 限制）"
+            )
+            await query.answer(toast, show_alert=True)
             bot_uname = getattr(getattr(context, "bot", None), "username", "") or ""
             text, markup = build_start_dashboard(engine, user.id, bot_username=bot_uname)
             try:

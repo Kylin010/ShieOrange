@@ -1945,6 +1945,7 @@ class TestSecurityReviewRegressions(unittest.TestCase):
             upd_join = SimpleNamespace(
                 my_chat_member=SimpleNamespace(
                     chat=SimpleNamespace(id=-10077, title="NewGroup", type="supergroup"),
+                    from_user=SimpleNamespace(id=999, full_name="Owner"),
                     old_chat_member=SimpleNamespace(status="left"),
                     new_chat_member=SimpleNamespace(
                         status="administrator",
@@ -1970,6 +1971,7 @@ class TestSecurityReviewRegressions(unittest.TestCase):
             upd_join2 = SimpleNamespace(
                 my_chat_member=SimpleNamespace(
                     chat=SimpleNamespace(id=-10078, title="MediaRestrictedGroup", type="supergroup"),
+                    from_user=SimpleNamespace(id=999, full_name="Owner"),
                     old_chat_member=SimpleNamespace(status="left"),
                     new_chat_member=SimpleNamespace(status="member"),
                 )
@@ -2557,6 +2559,107 @@ class TestSecurityReviewRegressions(unittest.TestCase):
                 asyncio.run(handle_private_owner_input(SimpleNamespace(message=m_stranger_fwd, effective_user=stranger), ctx))
                 m_stranger_fwd.reply_text.assert_not_called()
                 self.assertEqual(len(db.list_forwarded_samples(limit=5)), 1)
+            finally:
+                db.conn.close()
+
+    def test_32_owner_only_group_join_guard_and_auto_leave(self) -> None:
+        """Verify owner-only group join guard defaults ON, auto-leaves stranger groups (online & offline add),
+        alerts owner in DM without spending AI tokens, and can be toggled from private /start dashboard."""
+        from shieorange.panel import build_start_dashboard, handle_callback
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Storage(str(Path(tmp) / "t.db"))
+            try:
+                cfg = AppConfig(telegram_bot_token="123456:TESTTOKEN", ai_api_key="sk-test", owner_ids={5689})
+                llm = UniversalAIClient("sk-test", "https://api.deepseek.com/v1", "deepseek-flash")
+                llm.classify = AsyncMock()
+                eng = GuardEngine(cfg, db, llm)
+
+                # 1. Default ON
+                self.assertTrue(eng.is_owner_only_join_enabled())
+                dash_txt, _ = build_start_dashboard(eng, 5689, bot_username="DemoBot")
+                self.assertIn("仅超管可拉群", dash_txt)
+
+                # 2. Stranger (8888) adds bot to -100991 -> auto-leave + alert owner + zero DB pollution
+                bot = SimpleNamespace(
+                    id=111,
+                    leave_chat=AsyncMock(),
+                    send_photo=AsyncMock(),
+                    send_message=AsyncMock(),
+                    get_chat_administrators=AsyncMock(return_value=[]),
+                )
+                upd_stranger = SimpleNamespace(
+                    my_chat_member=SimpleNamespace(
+                        chat=SimpleNamespace(id=-100991, title="StrangerGrp", type="supergroup"),
+                        from_user=SimpleNamespace(id=8888, full_name="Stranger", username="stranger"),
+                        old_chat_member=SimpleNamespace(status="left"),
+                        new_chat_member=SimpleNamespace(status="administrator", can_delete_messages=True, can_restrict_members=True),
+                    )
+                )
+                asyncio.run(eng.handle_my_chat_member(upd_stranger, SimpleNamespace(bot=bot)))
+                bot.leave_chat.assert_awaited_once_with(-100991)
+                bot.send_photo.assert_not_called()
+                self.assertFalse(db.has_group(-100991))
+                bot.send_message.assert_awaited_once()
+                self.assertEqual(bot.send_message.call_args.args[0], 5689)
+                self.assertIn("已拦截未授权拉群并自动退群", bot.send_message.call_args.args[1])
+
+                # 3. Offline-add loophole: unseen group -100992 sends a message, no owner in admins -> auto-leave, 0 AI calls!
+                bot.leave_chat.reset_mock()
+                bot.send_message.reset_mock()
+                stranger_chat = SimpleNamespace(id=-100992, title="OfflineStrangerGrp", type="supergroup")
+                msg_offline = SimpleNamespace(
+                    chat=stranger_chat,
+                    message_id=10,
+                    from_user=SimpleNamespace(id=7777, full_name="User", username=None, is_bot=False),
+                    sender_chat=None,
+                    text="微信洗钱 一天8000",
+                    caption=None,
+                    entities=[],
+                    caption_entities=[],
+                )
+                ctx = SimpleNamespace(bot=bot, application=SimpleNamespace(bot_data={"engine": eng}))
+                asyncio.run(eng.handle_message(SimpleNamespace(message=msg_offline, edited_message=None), ctx))
+                bot.leave_chat.assert_awaited_once_with(-100992)
+                llm.classify.assert_not_called()
+                self.assertFalse(db.has_group(-100992))
+
+                # 4. Offline-add by Owner: unseen group -100993 has Owner as admin -> auto-authorized, NOT left!
+                bot.leave_chat.reset_mock()
+                bot.get_chat_administrators = AsyncMock(
+                    return_value=[SimpleNamespace(status="creator", user=SimpleNamespace(id=5689))]
+                )
+                owner_chat = SimpleNamespace(id=-100993, title="OwnerOfflineGrp", type="supergroup")
+                ok_auth = asyncio.run(eng._ensure_group_authorized_runtime(bot, owner_chat))
+                self.assertTrue(ok_auth)
+                bot.leave_chat.assert_not_called()
+                self.assertTrue(db.has_group(-100993))
+
+                # 5. Owner toggles join guard OFF via /start callback -> stranger can now add -100994
+                q_tog = SimpleNamespace(
+                    data="aiconf:toggle_join_guard",
+                    from_user=SimpleNamespace(id=5689, full_name="Owner"),
+                    message=SimpleNamespace(chat=SimpleNamespace(id=5689, type="private")),
+                    answer=AsyncMock(),
+                    edit_message_text=AsyncMock(),
+                )
+                asyncio.run(handle_callback(SimpleNamespace(callback_query=q_tog), ctx))
+                self.assertFalse(eng.is_owner_only_join_enabled())
+
+                bot.leave_chat.reset_mock()
+                bot.send_photo.reset_mock()
+                upd_open = SimpleNamespace(
+                    my_chat_member=SimpleNamespace(
+                        chat=SimpleNamespace(id=-100994, title="OpenGrp", type="supergroup"),
+                        from_user=SimpleNamespace(id=8888, full_name="Stranger", username="stranger"),
+                        old_chat_member=SimpleNamespace(status="left"),
+                        new_chat_member=SimpleNamespace(status="member"),
+                    )
+                )
+                asyncio.run(eng.handle_my_chat_member(upd_open, SimpleNamespace(bot=bot)))
+                bot.leave_chat.assert_not_called()
+                bot.send_photo.assert_awaited_once()
+                self.assertTrue(db.has_group(-100994))
             finally:
                 db.conn.close()
 

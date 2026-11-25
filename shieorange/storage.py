@@ -398,6 +398,12 @@ class Storage:
         return [(int(r["chat_id"]), int(r["message_id"]), float(r["delete_at"])) for r in rows]
 
     # ---- Per-group settings ----
+    def has_group(self, chat_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM group_settings WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+        return row is not None
+
     def get_group(
         self,
         chat_id: int,

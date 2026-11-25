@@ -486,9 +486,23 @@ class GuardEngine:
         self._handled_commands: deque[tuple[int, int]] = deque(maxlen=300)
         # Anti-duplicate cooldown for bot group-join entrance announcements (chat_id -> timestamp)
         self._greeted_chats: dict[int, float] = {}
+        # Anti-spam dedup for unauthorized group-join owner DM alerts ((chat_id, inviter_id) -> timestamp)
+        self._join_reject_notified: dict[tuple[int, int], float] = {}
 
     def is_group_allowed(self, chat_id: int) -> bool:
         return (not self.cfg.allowed_group_ids) or (chat_id in self.cfg.allowed_group_ids)
+
+    def has_any_owner(self) -> bool:
+        return bool(self.get_owner_ids())
+
+    def is_owner_only_join_enabled(self) -> bool:
+        val = self.storage.get_meta("owner_only_join")
+        if val is None:
+            return True  # Default ON: block strangers from adding the bot and consuming your AI quota
+        return val == "1"
+
+    def set_owner_only_join(self, enabled: bool) -> None:
+        self.storage.set_meta("owner_only_join", "1" if enabled else "0")
 
     @staticmethod
     def _env_ai_hash(cfg: AppConfig) -> str:
@@ -1436,14 +1450,101 @@ class GuardEngine:
         owners = self.get_owner_ids()
         return next(iter(owners)) if owners else None
 
-    # ---- Bot's own group membership event (MY_CHAT_MEMBER: entrance announcement with ShieOrange photo!) ----
+    async def _reject_and_leave_unauthorized_group(
+        self, bot: Any, chat: Any, *, inviter: Any = None, reason_text: str
+    ) -> None:
+        """Immediately leave an unauthorized group without touching DB/AI and alert Owner(s) in DM."""
+        chat_id = chat.id
+        chat_title = getattr(chat, "title", "") or str(chat_id)
+        inviter_id = getattr(inviter, "id", 0) if inviter else 0
+        if inviter:
+            inv_uname = f" (@{inviter.username})" if getattr(inviter, "username", None) else ""
+            inviter_desc = f"{getattr(inviter, 'full_name', '') or inviter_id}{inv_uname} [{inviter_id}]"
+        else:
+            inviter_desc = "未知（可能于离线期间拉入）"
+
+        left_ok = False
+        if hasattr(bot, "leave_chat"):
+            try:
+                await bot.leave_chat(chat_id)
+                left_ok = True
+            except TelegramError as exc:
+                logger.warning("退出未授权群组 %s 失败: %s", chat_id, exc)
+        logger.warning(
+            "🚫 已拦截未授权群组%s: chat=%s (%s) inviter=%s reason=%s",
+            "并自动退群" if left_ok else "（退群失败，已拒绝响应）",
+            chat_id,
+            chat_title,
+            inviter_desc,
+            reason_text,
+        )
+
+        now = time.time()
+        dedup_key = (chat_id, inviter_id)
+        if now - self._join_reject_notified.get(dedup_key, 0.0) < 300.0:
+            return
+        if len(self._join_reject_notified) >= 500:
+            stale = [k for k, t in self._join_reject_notified.items() if now - t >= 300.0]
+            for k in stale:
+                self._join_reject_notified.pop(k, None)
+            if len(self._join_reject_notified) >= 500:
+                self._join_reject_notified.pop(next(iter(self._join_reject_notified)))
+        self._join_reject_notified[dedup_key] = now
+
+        alert = (
+            f"🚫 [已拦截未授权拉群{'并自动退群' if left_ok else ''}]\n"
+            f"• 陌生群组：{chat_title} ({chat_id})\n"
+            f"• 拉人者：{inviter_desc}\n"
+            f"• 拦截原因：{reason_text}\n"
+            f"• 状态：未消耗任何 AI 额度{'，机器人已自动退出该群' if left_ok else '，已拒绝一切响应'}。\n"
+            f"（如需允许他人拉群，可在私聊 /start 切换「防陌生人拉群」开关，或将群 ID 加入 .env 的 ALLOWED_GROUP_IDS）"
+        )
+        for oid in self.get_owner_ids():
+            try:
+                await bot.send_message(oid, alert)
+            except TelegramError:
+                pass
+
+    async def _ensure_group_authorized_runtime(self, bot: Any, chat: Any) -> bool:
+        """Defense-in-depth runtime authorization check (seals offline-add / drop_pending_updates loophole)."""
+        if not self.is_group_allowed(chat.id):
+            await self._reject_and_leave_unauthorized_group(
+                bot, chat, reason_text="该群不在 ALLOWED_GROUP_IDS 允许列表中"
+            )
+            return False
+        if (
+            not self.is_owner_only_join_enabled()
+            or not self.has_any_owner()
+            or (chat.id in self.cfg.allowed_group_ids)
+        ):
+            return True
+        if self.storage.has_group(chat.id):
+            return True
+        # Group was not seen via authorized MY_CHAT_MEMBER (e.g., added while bot was offline/restarting).
+        # Verify whether any Owner is an admin/creator in this group before activating or leaving!
+        if not hasattr(bot, "get_chat_administrators"):
+            return False
+        try:
+            admins = await bot.get_chat_administrators(chat.id)
+        except TelegramError:
+            return False
+        if any(
+            getattr(m, "user", None) and self.is_owner(m.user.id)
+            for m in admins
+        ):
+            self.get_group_settings(chat.id, getattr(chat, "title", "") or "")
+            return True
+        await self._reject_and_leave_unauthorized_group(
+            bot, chat, reason_text="未授权陌生群组（群内无超管且非超管拉入）"
+        )
+        return False
+
+    # ---- Bot's own group membership event (MY_CHAT_MEMBER: owner-only guard + entrance photo report!) ----
     async def handle_my_chat_member(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         cm = update.my_chat_member
         if not cm or not cm.chat or cm.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-            return
-        if not self.is_group_allowed(cm.chat.id):
             return
 
         old_st = getattr(cm.old_chat_member, "status", None)
@@ -1457,6 +1558,30 @@ class GuardEngine:
             ChatMemberStatus.ADMINISTRATOR,
         )
         if not (was_outside and is_now_in):
+            return
+
+        inviter = getattr(cm, "from_user", None)
+        if not self.is_group_allowed(cm.chat.id):
+            await self._reject_and_leave_unauthorized_group(
+                context.bot,
+                cm.chat,
+                inviter=inviter,
+                reason_text="该群不在 ALLOWED_GROUP_IDS 允许列表中",
+            )
+            return
+
+        if (
+            self.is_owner_only_join_enabled()
+            and self.has_any_owner()
+            and (cm.chat.id not in self.cfg.allowed_group_ids)
+            and not (inviter and self.is_owner(inviter.id))
+        ):
+            await self._reject_and_leave_unauthorized_group(
+                context.bot,
+                cm.chat,
+                inviter=inviter,
+                reason_text="已开启「🔒 仅允许超管拉群」，非超管不可拉入新群",
+            )
             return
 
         now = time.time()
@@ -1515,6 +1640,13 @@ class GuardEngine:
         if not cm or not cm.chat or cm.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
             return
         if not self.is_group_allowed(cm.chat.id):
+            return
+        if (
+            self.is_owner_only_join_enabled()
+            and self.has_any_owner()
+            and (cm.chat.id not in self.cfg.allowed_group_ids)
+            and not self.storage.has_group(cm.chat.id)
+        ):
             return
 
         old_m = cm.old_chat_member
@@ -1645,6 +1777,13 @@ class GuardEngine:
             return
         if not self.is_group_allowed(msg.chat.id):
             return
+        if (
+            self.is_owner_only_join_enabled()
+            and self.has_any_owner()
+            and (msg.chat.id not in self.cfg.allowed_group_ids)
+            and not self.storage.has_group(msg.chat.id)
+        ):
+            return
         gs = self.get_group_settings(msg.chat.id, msg.chat.title or "")
         if gs.enabled and gs.clean_service_msgs and not gs.dry_run:
             try:
@@ -1660,7 +1799,7 @@ class GuardEngine:
             return
         if msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
             return
-        if not self.is_group_allowed(msg.chat.id):
+        if not await self._ensure_group_authorized_runtime(context.bot, msg.chat):
             return
 
         # Skip ONLY commands that were actually authorized & handled in group 0!
