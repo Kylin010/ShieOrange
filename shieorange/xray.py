@@ -141,6 +141,16 @@ def _looks_like_random_latin(full_name: str) -> bool:
     return False
 
 
+def _looks_like_single_gibberish_latin(full_name: str) -> bool:
+    """Detect single-word consonant-mash bot names like 'Gbgjf' or 'Zllh' (excludes ALL-CAPS tech acronyms like HTTP/VPS)."""
+    s = full_name.strip()
+    if len(s) < 4 or not s.isascii() or not s.isalpha():
+        return False
+    if s.isupper():
+        return False
+    return not bool(_VOWEL_RE.search(s))
+
+
 def analyze_profile_risk(profile: dict[str, Any], clean_count: int = 0) -> tuple[list[str], int, bool]:
     """Additive profile risk scoring for blank/bulk-registered & promo-obfuscated spam accounts.
 
@@ -149,6 +159,7 @@ def analyze_profile_risk(profile: dict[str, Any], clean_count: int = 0) -> tuple
       - Promo-bait / homophone slang in nickname or personal channel:                     +15
       - Two-part random/gibberish Latin name (e.g. "aawsda sdawsda"):                    +12
       - Two-part regular Latin name (e.g. "John Smith"):                                 +10
+      - Single-word vowel-less gibberish Latin name (e.g. "Gbgjf", "Zllh"):               +8
       - No real profile photo (default letter avatar):                                    +4
       - Empty profile (no bio and no personal channel):                                   +3
       - No @username set:                                                                 +2
@@ -170,6 +181,7 @@ def analyze_profile_risk(profile: dict[str, Any], clean_count: int = 0) -> tuple
     no_avatar = has_photo is False
     two_part_latin = bool(_TWO_PART_LATIN_RE.match(full_name))
     random_latin = two_part_latin and _looks_like_random_latin(full_name)
+    single_gibberish = (not two_part_latin) and _looks_like_single_gibberish_latin(full_name)
     empty_profile = (not bio) and (not personal_channel)
     no_username = username in {"", "(无)"}
 
@@ -182,7 +194,7 @@ def analyze_profile_risk(profile: dict[str, Any], clean_count: int = 0) -> tuple
     )
 
     full_hit = (
-        (no_avatar and two_part_latin and empty_profile and no_username)
+        (no_avatar and (two_part_latin or single_gibberish) and empty_profile and no_username)
         or (promo_bait and (name_sep_obf or pchat_sep_obf))
     )
 
@@ -210,6 +222,9 @@ def analyze_profile_risk(profile: dict[str, Any], clean_count: int = 0) -> tuple
     elif two_part_latin:
         flags.append("两段纯字母昵称(+10)")
         boost += 10
+    elif single_gibberish:
+        flags.append("单段无元音乱码字母昵称(+8)")
+        boost += 8
 
     if no_avatar:
         flags.append("无真实头像(+4)")
@@ -643,7 +658,9 @@ def extract_xray(msg: Any, is_edited: bool = False) -> MessageXRay:
             p for p in (getattr(contact, "first_name", "") or "", getattr(contact, "last_name", "") or "") if p
         )
         c_phone = getattr(contact, "phone_number", "") or ""
-        special_parts.append(f"分享名片({c_name} {c_phone})".strip())
+        c_vcard = (getattr(contact, "vcard", "") or "").strip()
+        vcard_note = f" vcard={c_vcard[:160]}" if c_vcard else ""
+        special_parts.append(f"分享名片({c_name} {c_phone}{vcard_note})".strip())
     venue = getattr(msg, "venue", None)
     if venue:
         special_parts.append(

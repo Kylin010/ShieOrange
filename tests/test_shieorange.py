@@ -2400,14 +2400,22 @@ class TestSecurityReviewRegressions(unittest.TestCase):
             self.assertGreaterEqual(boost, 30, msg=f"boost too low for {raw_name}: {flags}")
             self.assertTrue(is_max, msg=f"expected max_risk for {raw_name}")
 
-        # Normal nicknames must stay at +0 boost (zero false positives)
-        for normal_name in ["Kylin-010", "王小明", "Linux_Dev", "广州-张三"]:
+        # Normal nicknames (including ALL-CAPS tech acronyms & bio links) must stay at +0 boost
+        for normal_name in ["Kylin-010", "王小明", "Linux_Dev", "广州-张三", "HTTP", "NVMe"]:
             flags, boost, is_max = analyze_profile_risk(
-                {"full_name": normal_name, "username": "@devuser", "bio": "VPS玩家", "personal_channel": "", "has_photo": True},
+                {"full_name": normal_name, "username": "@devuser", "bio": "个人博客 https://t.me/mytech", "personal_channel": "我的笔记 @mynote", "has_photo": True},
                 clean_count=0,
             )
             self.assertEqual(boost, 0, msg=f"unexpected boost for normal user {normal_name}: {flags}")
             self.assertFalse(is_max)
+
+        # Single-word vowel-less gibberish bot name (like live 'Gbgjf' / 'Zllh') gets +8 & max_risk with blank profile
+        g_flags, g_boost, g_max = analyze_profile_risk(
+            {"full_name": "Gbgjf", "username": "(无)", "bio": "", "personal_channel": "", "has_photo": False},
+            clean_count=0,
+        )
+        self.assertEqual(g_boost, 17)  # +8 gibberish +4 no_avatar +3 empty +2 no_username
+        self.assertTrue(g_max)
 
         # 2. Live pipeline test: '-点-简界*·看·橡·-木' sends '5' with spam_score=85 and hesitant AI=57 -> BANNED!
         with tempfile.TemporaryDirectory() as tmp:
