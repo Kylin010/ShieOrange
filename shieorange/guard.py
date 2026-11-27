@@ -1887,6 +1887,13 @@ class GuardEngine:
             else 0
         )
 
+        first_message_only = bool(
+            gs.first_message_only and user and not msg.sender_chat and not is_linked_channel
+        )
+        review_message = not first_message_only
+        if first_message_only and not is_edited and clean_count == 0:
+            review_message = self.storage.claim_first_message_review(msg.chat.id, actor_id)
+
         # ---- Layer 1: Zero-cost instant rules ----
         if gs.cas_enabled and user and not is_channel_speaker and clean_count == 0:
             if await self.cas.is_banned(user.id):
@@ -2066,6 +2073,10 @@ class GuardEngine:
                         pass
                 return
 
+        if not review_message:
+            self.record_clean_context(msg)
+            return
+
         # ---- Layer 2: Per-chat whole-message fingerprint & Swarm tracking ----
         profile = await self.get_profile(context.bot, user) if user else {}
         want_vision = gs.vision_enabled and self.llm.vision_supported
@@ -2076,7 +2087,9 @@ class GuardEngine:
 
         # 2a. Per-chat verified PURE-CONTENT spam cache hit (never populated by profile/history-contaminated verdicts;
         #     when exempt_reply_cache is enabled, replies to any message — including stickers/media — skip shared cache)
-        allow_cache = xray.allow_shared_cache() or (not gs.exempt_reply_cache)
+        allow_cache = not first_message_only and (
+            xray.allow_shared_cache() or not gs.exempt_reply_cache
+        )
         cached_hit = (
             self.spam_cache.lookup(msg_fp, min_score=gs.spam_score)
             if allow_cache
@@ -2112,7 +2125,8 @@ class GuardEngine:
             profile, clean_count=clean_count
         )
         if (
-            not is_swarm
+            not first_message_only
+            and not is_swarm
             and not is_max_risk
             and prev_flagged_actor is None
             and not self.should_send_to_ai(

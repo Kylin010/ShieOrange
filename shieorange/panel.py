@@ -559,6 +559,7 @@ def build_exempts_view(engine: GuardEngine, gs: GroupSettings) -> tuple[str, Inl
     """Build per-group interactive GUI subpanel for all moderation exemptions & bypass rules."""
     cid = gs.chat_id
     ext_label = _EXT_CH_LABELS.get(gs.external_channel_mode, "正常审核")
+    review_scope = "仅审首条" if gs.first_message_only else "持续审核"
 
     def _onoff(flag: bool, on_txt: str = "✅ 豁免", off_txt: str = "⬜ 照常审核") -> str:
         return on_txt if flag else off_txt
@@ -573,7 +574,8 @@ def build_exempts_view(engine: GuardEngine, gs: GroupSettings) -> tuple[str, Inl
         f"• 🤝 白名单(/trust)：{_onoff(gs.exempt_trusted)}\n"
         f"• 👑 全局超管免检：{_onoff(gs.exempt_owners, '✅ 跨群免检', '⬜ 关闭（按群管理判定）')}\n"
         f"• 📣 外部频道马甲：{ext_label}\n"
-        f"• 👴 老群友短句免AI：{_onoff(gs.exempt_veteran_short, '✅ 开启（省 Token）', '⬜ 关闭（每条必审）')}\n"
+        f"• 👤 普通成员语义审核：{review_scope}（刷屏和危险文件等硬规则始终生效）\n"
+        f"• 👴 持续审核时老群友短句免AI：{_onoff(gs.exempt_veteran_short, '✅ 开启', '⬜ 关闭')}\n"
         f"• 💬 回复免缓存秒封：{_onoff(gs.exempt_reply_cache, '✅ 开启（逐人复核）', '⬜ 关闭（允许缓存秒封）')}\n"
         f"• 🛡 查管理超时防误删：{_onoff(gs.admin_cache_fallback, '✅ 开启（30分钟兜底）', '⬜ 关闭（严格实时）')}\n"
         f"━━━━━━━━━━━━━━\n"
@@ -609,6 +611,12 @@ def build_exempts_view(engine: GuardEngine, gs: GroupSettings) -> tuple[str, Inl
                 InlineKeyboardButton(
                     f"📣 外部频道：{ext_label}",
                     callback_data=f"cfg:ex_extch:{cid}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"👤 普通成员：{review_scope}",
+                    callback_data=f"cfg:ex_first_msg:{cid}",
                 ),
             ],
             [
@@ -2278,6 +2286,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "ex_trusted",
         "ex_owners",
         "ex_extch",
+        "ex_first_msg",
         "ex_short",
         "ex_reply",
         "ex_fallback",
@@ -2300,9 +2309,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif action == "ex_extch":
             gs.external_channel_mode = _CYCLE_EXT_CH.get(gs.external_channel_mode, "ai")
             toast = f"外部频道马甲策略：{_EXT_CH_LABELS[gs.external_channel_mode]}"
+        elif action == "ex_first_msg":
+            gs.first_message_only = not gs.first_message_only
+            toast = f"普通成员语义审核已切换为{'仅审首条' if gs.first_message_only else '持续审核'}"
         elif action == "ex_short":
             gs.exempt_veteran_short = not gs.exempt_veteran_short
-            toast = f"老群友短消息免AI已{'开启' if gs.exempt_veteran_short else '关闭（每条必审）'}"
+            toast = f"持续审核时老群友短消息免AI已{'开启' if gs.exempt_veteran_short else '关闭'}"
         elif action == "ex_reply":
             gs.exempt_reply_cache = not gs.exempt_reply_cache
             toast = f"回复消息免缓存秒封已{'开启' if gs.exempt_reply_cache else '关闭'}"
