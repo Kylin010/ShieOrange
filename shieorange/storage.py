@@ -29,7 +29,7 @@ class GroupSettings:
     flood_window: int = 8
     flood_max: int = 6
     via_bot_mode: str = "ban"         # "ban" | "ai" | "off"
-    start_cmd_mode: str = "delete"    # "delete" | "ban" | "off"
+    start_cmd_mode: str = "off"       # Legacy setting retained for database compatibility
     check_edited: bool = True
     announce_in_group: bool = True    # Announce ban in group chat (customizable template & auto-delete in GUI)
     announce_delete_seconds: int = 1800  # Auto-delete group ban notice after N seconds (default 30 min; 0 = keep forever)
@@ -93,7 +93,7 @@ class Storage:
                 flood_window INTEGER NOT NULL DEFAULT 8,
                 flood_max INTEGER NOT NULL DEFAULT 6,
                 via_bot_mode TEXT NOT NULL DEFAULT 'ban',
-                start_cmd_mode TEXT NOT NULL DEFAULT 'delete',
+                start_cmd_mode TEXT NOT NULL DEFAULT 'off',
                 check_edited INTEGER NOT NULL DEFAULT 1,
                 announce_in_group INTEGER NOT NULL DEFAULT 1,
                 announce_delete_seconds INTEGER NOT NULL DEFAULT 1800,
@@ -795,6 +795,7 @@ class Storage:
         "ai_suspect",
         "anti_flood_review",
         "anti_flood_repeat",
+        "channel_review",
     )
     _AI_TRIGGERS = ("ai_text", "ai_vision", "edited_ai", "gray_zone", "ai_suspect")
 

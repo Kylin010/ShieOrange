@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageEntity, Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -44,6 +44,9 @@ logger = logging.getLogger("shieorange.guard")
 # Telegram treats restrict until_date < 30s from now as permanent; require >= 45s safety margin.
 MIN_FINITE_RESTRICT_SECONDS = 45
 SHORT_CHAT_LENGTH = 20
+_PLAIN_START_RE = re.compile(
+    r"/start(?:@[A-Za-z0-9_]{5,32})?(?:[ \t]+[A-Za-z0-9_-]{1,64})?", re.IGNORECASE
+)
 
 DEFAULT_ANNOUNCE_TEMPLATE = (
     "🍊🛡 神盾橘已封禁用户：{user}\n"
@@ -1808,6 +1811,12 @@ class GuardEngine:
         if not is_edited and self.consume_handled_command(msg.chat.id, msg.message_id):
             return
 
+        # A plain Telegram start command or deep link is not a moderation sample.
+        if _PLAIN_START_RE.fullmatch((msg.text or "").strip()) and all(
+            ent.type == MessageEntity.BOT_COMMAND for ent in (msg.entities or ())
+        ):
+            return
+
         gs = self.get_group_settings(msg.chat.id, msg.chat.title or "")
         if not gs.enabled:
             return
@@ -1889,7 +1898,8 @@ class GuardEngine:
         )
 
         first_message_only = bool(
-            gs.first_message_only and user and not msg.sender_chat and not is_linked_channel
+            gs.first_message_only
+            and (is_channel_speaker or (user and not msg.sender_chat and not is_linked_channel))
         )
         review_message = not first_message_only
         if first_message_only and not is_edited and clean_count == 0:
@@ -2050,36 +2060,12 @@ class GuardEngine:
                 )
                 return
 
-        if gs.start_cmd_mode != "off" and xray.commands:
-            first_cmd = xray.commands[0].lower()
-            if first_cmd == "/start" or first_cmd.startswith("/start@"):
-                if gs.start_cmd_mode == "ban":
-                    profile = await self.get_profile(context.bot, user)
-                    await self.enforce_action(
-                        context.bot,
-                        msg,
-                        gs,
-                        action="ban",
-                        trigger_type="start_cmd",
-                        score=100,
-                        reason=f"非管理员在群内发送触发指令 {first_cmd}",
-                        xray=xray,
-                        profile=profile,
-                    )
-                elif not gs.dry_run:
-                    try:
-                        await context.bot.delete_message(msg.chat.id, msg.message_id)
-                        self.storage.inc_metric(msg.chat.id, "deletes")
-                    except TelegramError:
-                        pass
-                return
-
         if not review_message:
             self.record_clean_context(msg)
             return
 
         # ---- Layer 2: Per-chat whole-message fingerprint & Swarm tracking ----
-        profile = await self.get_profile(context.bot, user) if user else {}
+        profile = await self.get_profile(context.bot, user) if user and not is_channel_speaker else {}
         want_vision = gs.vision_enabled and self.llm.vision_supported
         image_data_url = await extract_image_data_url(context.bot, msg) if want_vision else None
 
@@ -2088,7 +2074,7 @@ class GuardEngine:
 
         # 2a. Per-chat verified PURE-CONTENT spam cache hit (never populated by profile/history-contaminated verdicts;
         #     when exempt_reply_cache is enabled, replies to any message — including stickers/media — skip shared cache)
-        allow_cache = not first_message_only and (
+        allow_cache = not (first_message_only or is_channel_speaker) and (
             xray.allow_shared_cache() or not gs.exempt_reply_cache
         )
         cached_hit = (
@@ -2270,7 +2256,7 @@ class GuardEngine:
             and not used_basic_rules
             and (would_ban or would_mute)
             and 0 < len(xray.normalized_text.strip()) <= SHORT_CHAT_LENGTH
-            and not xray.has_risk_signal()
+            and not xray.has_risk_signal(include_sender_chat=False)
             and not any("引流" in flag for flag in profile_flags)
             and (
                 pure_rule_verdict or evaluate_basic_rules(xray, {}, pure_content_only=True)
@@ -2472,6 +2458,11 @@ class GuardEngine:
         user = msg.from_user
         is_channel_speaker = bool(msg.sender_chat and msg.sender_chat.id != chat.id)
         actor_id = msg.sender_chat.id if is_channel_speaker else (user.id if user else 0)
+        if is_channel_speaker and gs.external_channel_mode == "ai":
+            # Banning a sender chat restricts all channels owned by that person.
+            # Leave this decision to a moderator in the review policy.
+            action = "mute_review"
+            trigger_type = "channel_review"
         if is_channel_speaker:
             display_name = f"[频道马甲] {xray.sender_chat}"
         else:
@@ -2539,7 +2530,8 @@ class GuardEngine:
             if action == "mute_review":
                 # Channel identities cannot be muted: ONLY delete current message & ask admin to confirm ban!
                 if is_channel_speaker and msg.sender_chat:
-                    self.storage.inc_metric(chat.id, "deletes")
+                    if deleted_ok:
+                        self.storage.inc_metric(chat.id, "deletes")
                     status_badge = (
                         "⚖️ [频道马甲疑似灰区：已删当前消息，请复核是否封禁该频道]"
                         if deleted_ok

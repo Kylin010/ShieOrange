@@ -60,10 +60,8 @@ from .xray import (
 logger = logging.getLogger("shieorange.panel")
 
 _VIA_LABELS = {"ban": "直接秒封", "ai": "交给AI判", "off": "不拦截"}
-_START_LABELS = {"delete": "秒删", "ban": "直接秒封", "off": "不拦截"}
-_EXT_CH_LABELS = {"ai": "正常审核", "ban": "一律拦截", "allow": "放行跳过"}
+_EXT_CH_LABELS = {"ai": "审核后由管理员决定封禁", "ban": "一律拦截", "allow": "放行跳过"}
 _CYCLE_VIA = {"ban": "ai", "ai": "off", "off": "ban"}
-_CYCLE_START = {"delete": "ban", "ban": "off", "off": "delete"}
 _CYCLE_EXT_CH = {"ai": "ban", "ban": "allow", "allow": "ai"}
 _CYCLE_SCORE = {70: 80, 80: 85, 85: 90, 90: 70}
 
@@ -511,10 +509,6 @@ def build_panel_view(engine: GuardEngine, gs: GroupSettings) -> tuple[str, Inlin
                     f"🧩 外联卡片：{_VIA_LABELS.get(gs.via_bot_mode, gs.via_bot_mode)}",
                     callback_data=f"cfg:viabot:{cid}",
                 ),
-                InlineKeyboardButton(
-                    f"⌨️ /start：{_START_LABELS.get(gs.start_cmd_mode, gs.start_cmd_mode)}",
-                    callback_data=f"cfg:startcmd:{cid}",
-                ),
             ],
             [
                 InlineKeyboardButton(
@@ -574,7 +568,7 @@ def build_exempts_view(engine: GuardEngine, gs: GroupSettings) -> tuple[str, Inl
         f"• 🤝 白名单(/trust)：{_onoff(gs.exempt_trusted)}\n"
         f"• 👑 全局超管免检：{_onoff(gs.exempt_owners, '✅ 跨群免检', '⬜ 关闭（按群管理判定）')}\n"
         f"• 📣 外部频道马甲：{ext_label}\n"
-        f"• 👤 普通成员语义审核：{review_scope}（刷屏和危险文件等硬规则始终生效）\n"
+        f"• 👤 成员与频道语义审核：{review_scope}（后续仍检查刷屏和危险文件）\n"
         f"• 👴 持续审核时老群友短句免AI：{_onoff(gs.exempt_veteran_short, '✅ 开启', '⬜ 关闭')}\n"
         f"• 💬 回复免缓存秒封：{_onoff(gs.exempt_reply_cache, '✅ 开启（逐人复核）', '⬜ 关闭（允许缓存秒封）')}\n"
         f"• 🛡 查管理超时防误删：{_onoff(gs.admin_cache_fallback, '✅ 开启（30分钟兜底）', '⬜ 关闭（严格实时）')}\n"
@@ -615,7 +609,7 @@ def build_exempts_view(engine: GuardEngine, gs: GroupSettings) -> tuple[str, Inl
             ],
             [
                 InlineKeyboardButton(
-                    f"👤 普通成员：{review_scope}",
+                    f"👤 成员与频道：{review_scope}",
                     callback_data=f"cfg:ex_first_msg:{cid}",
                 ),
             ],
@@ -754,10 +748,7 @@ async def cmd_start_private(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def cmd_start_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Group /start: responds to verified group admins (incl. anonymous admins & linked channel) with a quick guide + /config button.
-
-    Non-admin /start messages are NOT marked handled so Group 1 anti-spam (start_cmd_mode) still catches spammers!
-    """
+    """Show the group setup guide to verified administrators."""
     engine: GuardEngine = context.application.bot_data["engine"]
     msg = update.message
     user = update.effective_user
@@ -2113,9 +2104,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         engine.storage.save_group(gs)
         toast = f"外部内联卡片策略：{_VIA_LABELS[gs.via_bot_mode]}"
     elif action == "startcmd":
-        gs.start_cmd_mode = _CYCLE_START.get(gs.start_cmd_mode, "delete")
-        engine.storage.save_group(gs)
-        toast = f"群内 /start 策略：{_START_LABELS[gs.start_cmd_mode]}"
+        toast = "普通 /start 指令已免审"
     elif action == "malware":
         gs.block_malware_files = not gs.block_malware_files
         engine.storage.save_group(gs)
@@ -2311,7 +2300,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             toast = f"外部频道马甲策略：{_EXT_CH_LABELS[gs.external_channel_mode]}"
         elif action == "ex_first_msg":
             gs.first_message_only = not gs.first_message_only
-            toast = f"普通成员语义审核已切换为{'仅审首条' if gs.first_message_only else '持续审核'}"
+            toast = f"成员与频道语义审核已切换为{'仅审首条' if gs.first_message_only else '持续审核'}"
         elif action == "ex_short":
             gs.exempt_veteran_short = not gs.exempt_veteran_short
             toast = f"持续审核时老群友短消息免AI已{'开启' if gs.exempt_veteran_short else '关闭'}"

@@ -2716,6 +2716,7 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             eng = GuardEngine(cfg, db, llm)
             gs = eng.get_group_settings(-1001)
             gs.cas_enabled = False
+            gs.start_cmd_mode = "ban"
             db.save_group(gs)
             bot = SimpleNamespace(
                 id=1,
@@ -2727,6 +2728,13 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
                 send_message=AsyncMock(),
             )
             ctx = SimpleNamespace(bot=bot)
+            for message_id, text in enumerate(("/start", "/start@ExampleBot test-token"), 1):
+                start = _fake_msg(msg_id=message_id, text=text)
+                await eng.handle_message(SimpleNamespace(edited_message=None, message=start), ctx)
+            llm.classify.assert_not_awaited()
+            bot.delete_message.assert_not_awaited()
+            bot.ban_chat_member.assert_not_awaited()
+
             joke = _fake_msg(text="胆大来洗米")
             joke.from_user.full_name = "小明"
             await eng.handle_message(SimpleNamespace(edited_message=None, message=joke), ctx)
@@ -2742,6 +2750,27 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             ad = _fake_msg(msg_id=11, user_id=501, text="招代发，预付开工")
             await eng.handle_message(SimpleNamespace(edited_message=None, message=ad), ctx)
             bot.ban_chat_member.assert_awaited_once_with(-1001, 501, revoke_messages=True)
+
+            bot.delete_message.reset_mock()
+            llm.classify.reset_mock()
+            channel = SimpleNamespace(id=-10010, title="Test channel", username="test_channel")
+            channel_joke = _fake_msg(msg_id=12, user_id=0, text=joke.text, sender_chat=channel)
+            channel_reply = _fake_msg(msg_id=13, user_id=0, text="继续聊天", sender_chat=channel)
+            for message in (channel_joke, channel_reply):
+                await eng.handle_message(SimpleNamespace(edited_message=None, message=message), ctx)
+            llm.classify.assert_awaited_once()
+            bot.delete_message.assert_not_awaited()
+            _, suspects = db.get_recent_suspects()
+            self.assertEqual(suspects[0]["sender_chat_id"], channel.id)
+
+            other_channel = SimpleNamespace(id=-10020, title="Test ads", username="test_ads")
+            channel_ad = _fake_msg(msg_id=14, user_id=0, text=ad.text, sender_chat=other_channel)
+            bot.ban_chat_sender_chat = AsyncMock()
+            await eng.handle_message(SimpleNamespace(edited_message=None, message=channel_ad), ctx)
+            bot.delete_message.assert_awaited_once_with(-1001, 14)
+            bot.ban_chat_sender_chat.assert_not_awaited()
+            _, suspects = db.get_recent_suspects()
+            self.assertEqual(suspects[0]["trigger_type"], "channel_review")
 
     async def test_first_review_is_per_group_and_survives_concurrency_failure_and_restart(self) -> None:
         cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
