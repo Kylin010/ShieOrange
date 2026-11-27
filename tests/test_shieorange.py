@@ -2707,6 +2707,42 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             bot.ban_chat_member.assert_awaited_once_with(-1001, 500, revoke_messages=True)
             llm.classify.assert_not_awaited()
 
+    async def test_high_ai_score_on_untracked_members_short_joke_only_logs_suspicion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, Storage(str(Path(tmp) / "moderation.db")) as db:
+            cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
+            llm = UniversalAIClient("sk-test", "https://example.com/v1", "test-model")
+            self.addAsyncCleanup(llm.close)
+            llm.classify = AsyncMock(return_value=SpamVerdict(True, 98, "模型认为是广告"))
+            eng = GuardEngine(cfg, db, llm)
+            gs = eng.get_group_settings(-1001)
+            gs.cas_enabled = False
+            db.save_group(gs)
+            bot = SimpleNamespace(
+                id=1,
+                get_chat_administrators=AsyncMock(return_value=[]),
+                get_chat=AsyncMock(return_value=SimpleNamespace(photo=object(), bio="Linux", personal_chat=None)),
+                delete_message=AsyncMock(),
+                ban_chat_member=AsyncMock(),
+                restrict_chat_member=AsyncMock(),
+                send_message=AsyncMock(),
+            )
+            ctx = SimpleNamespace(bot=bot)
+            joke = _fake_msg(text="胆大来洗米")
+            joke.from_user.full_name = "小明"
+            await eng.handle_message(SimpleNamespace(edited_message=None, message=joke), ctx)
+
+            llm.classify.assert_awaited_once()
+            bot.delete_message.assert_not_awaited()
+            bot.ban_chat_member.assert_not_awaited()
+            bot.restrict_chat_member.assert_not_awaited()
+            _, suspects = db.get_recent_suspects()
+            self.assertEqual(suspects[0]["score"], 98)
+            self.assertIn("仅记录供复核", suspects[0]["reason"])
+
+            ad = _fake_msg(msg_id=11, user_id=501, text="招代发，预付开工")
+            await eng.handle_message(SimpleNamespace(edited_message=None, message=ad), ctx)
+            bot.ban_chat_member.assert_awaited_once_with(-1001, 501, revoke_messages=True)
+
     async def test_first_review_is_per_group_and_survives_concurrency_failure_and_restart(self) -> None:
         cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
         llm = UniversalAIClient("sk-test", "https://example.com/v1", "test-model")

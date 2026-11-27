@@ -43,6 +43,7 @@ logger = logging.getLogger("shieorange.guard")
 
 # Telegram treats restrict until_date < 30s from now as permanent; require >= 45s safety margin.
 MIN_FINITE_RESTRICT_SECONDS = 45
+SHORT_CHAT_LENGTH = 20
 
 DEFAULT_ANNOUNCE_TEMPLATE = (
     "🍊🛡 神盾橘已封禁用户：{user}\n"
@@ -1398,7 +1399,7 @@ class GuardEngine:
             return False
         # Established active veterans sending clean short plain-text chat (<=20 chars, zero risk signals)
         # skip AI to keep active chat groups responsive and low-latency.
-        if clean_count >= 15 and profile_boost == 0 and text_len <= 20:
+        if clean_count >= 15 and profile_boost == 0 and text_len <= SHORT_CHAT_LENGTH:
             if local_rules_enabled and (
                 evaluate_basic_rules(xray, {}, profile_boost=0, pure_content_only=True).score > 0
             ):
@@ -2259,8 +2260,25 @@ class GuardEngine:
                 repeat_extra_ids = tracked_ids
                 repeat_note = f"（24h内第{hits}次重复发送，风险分升权至{eff}）"
 
+        gray_floor = max(60, gs.spam_score - 15)
+        would_ban = effective_score >= gs.spam_score
+        would_mute = gs.gray_zone_mute and effective_score >= gray_floor
+        # Older members without stored history can look new. Require independent
+        # promotion evidence before acting on a high AI score for a short opener.
+        needs_manual_review = (
+            first_message_only
+            and not used_basic_rules
+            and (would_ban or would_mute)
+            and 0 < len(xray.normalized_text.strip()) <= SHORT_CHAT_LENGTH
+            and not xray.has_risk_signal()
+            and not any("引流" in flag for flag in profile_flags)
+            and (
+                pure_rule_verdict or evaluate_basic_rules(xray, {}, pure_content_only=True)
+            ).score <= 50
+        )
+
         # ---- Graduated Enforcement (strictly per-person judgment!) ----
-        if effective_score >= gs.spam_score:
+        if would_ban and not needs_manual_review:
             # Shared same-group spam_cache ONLY accepts strictly pure standalone content verdicts
             # (never contaminated by another member's profile/bio/fragments/chat context!).
             if not gs.dry_run and msg_fp and allow_cache:
@@ -2348,8 +2366,7 @@ class GuardEngine:
                 )
             return
 
-        gray_floor = max(60, gs.spam_score - 15)
-        if gs.gray_zone_mute and effective_score >= gray_floor:
+        if would_mute and not needs_manual_review:
             await self.enforce_action(
                 context.bot,
                 msg,
@@ -2363,13 +2380,14 @@ class GuardEngine:
             )
             return
 
-        # Record mild AI suspicion (40..gray_floor-1) for admin "疑似排查 / AI 汇报" visibility (zero punishment!)
+        # Record AI suspicions for admin review without taking action.
         if self.llm.is_configured and not used_basic_rules and effective_score >= 40:
             suspect_name = (
                 f"[频道马甲] {xray.sender_chat}"
                 if is_channel_speaker
                 else (profile.get("full_name") or (user.full_name if user else "未知"))
             )
+            review_note = "（首条短句缺少独立广告证据，仅记录供复核）" if needs_manual_review else ""
             self.storage.log_action(
                 chat_id=msg.chat.id,
                 user_id=None if is_channel_speaker else actor_id,
@@ -2377,14 +2395,14 @@ class GuardEngine:
                 display_name=str(suspect_name),
                 trigger_type="ai_suspect",
                 score=effective_score,
-                reason=f"{verdict_reason}{profile_note}{repeat_note}",
+                reason=f"{verdict_reason}{profile_note}{repeat_note}{review_note}",
                 preview=xray.build_preview(),
                 dry_run=True,
             )
 
-        # Do NOT credit clean_count when AI failed with a broken response
+        # Preserve clean counts for messages with a usable verdict and no pending review.
         self.record_user_fragment(msg.chat.id, actor_id, msg.message_id, xray.normalized_text)
-        if user and not is_channel_speaker and not ai_failed:
+        if user and not is_channel_speaker and not ai_failed and not needs_manual_review:
             self.storage.increment_clean_count(msg.chat.id, user.id)
         self.record_clean_context(msg)
 
