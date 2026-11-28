@@ -84,6 +84,20 @@ docker compose up -d --build --force-recreate
 * `shieorange restart` — 重建并重启容器（自动重新加载修改后的 `.env` 环境变量）
 * `shieorange logs` / `stop` — 实时日志 / 停止服务
 
+### Telegram 私聊一键更新
+
+Linux systemd 部署可启用宿主机更新服务。服务每分钟检查 GitHub `main`，发现新版本时向 `OWNER_IDS` 配置的主人私发「一键更新」。机器人重启后，宿主机服务会回报版本和结果。
+
+先用终端更新到支持此功能的版本，并在 `.env` 填写 `OWNER_IDS`。从部署目录安装服务：
+
+```bash
+sudo install -m 0644 deploy/shieorange-updater@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now "shieorange-updater@$(systemd-escape --path "$PWD").service"
+```
+
+点按钮后，更新器校验通知对应的提交、构建并跑测试，再替换机器人容器。新版启动失败时会恢复上一版容器。宿主机更新服务支持官方仓库的 `main` 分支。
+
 ---
 
 ## 🔒 数据存储与隐私边界

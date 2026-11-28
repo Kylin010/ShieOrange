@@ -13,6 +13,8 @@ from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
+from .updater import request_update
+
 from . import __app_name__, __app_name_cn__, __version__
 from .branding import (
     DEFAULT_AVATAR_PATH,
@@ -1510,6 +1512,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     user = query.from_user
     data = query.data
+
+    if data.startswith("deploy:"):
+        chat = getattr(query.message, "chat", None)
+        if not chat or chat.type != ChatType.PRIVATE or chat.id != user.id or not engine.is_owner(user.id):
+            await query.answer("仅机器人主人可在私聊中更新", show_alert=True)
+            return
+        result = await request_update(data.partition(":")[2], user.id)
+        feedback = {
+            "queued": "已开始更新。完成后我会私信你。",
+            "busy": "正在更新，请等待结果。",
+            "stale": "这条更新通知已失效，请使用最新通知。",
+            "denied": "宿主机未授权这个账号更新。",
+        }
+        await query.answer(feedback.get(result, "宿主机更新服务暂时不可用。"), show_alert=True)
+        return
 
     # 1. Join captcha answer callback
     if data.startswith("cap:"):

@@ -1,0 +1,17 @@
+[Unit]
+Description=ShieOrange Telegram release updater (%f)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+WorkingDirectory=%f
+ExecStart=/usr/bin/python3 -m shieorange.updater
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=shieorange-updater-%i
+StateDirectoryMode=0700
+UMask=0077
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

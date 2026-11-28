@@ -909,6 +909,13 @@ run_cli_subcommand() {
         printf '   💡 若为旧版/压缩包安装迁移至最新公开版，请按 README「旧版/压缩包迁移」保留 .env 与 data/ 后重新克隆并执行 bash setup.sh --install-cli。\n' >&2
         exit 1
       fi
+      if command -v flock >/dev/null 2>&1; then
+        exec {update_lock}>"$WORK_DIR/.git/shieorange-update.lock"
+        if ! flock -n "$update_lock"; then
+          printf '已有一次神盾橘更新在运行，请等待结束。\n' >&2
+          exit 1
+        fi
+      fi
       printf '%s正在拉取 ShieOrange 最新代码...%s\n' "$C_CYAN" "$C_RESET"
       if ! git -C "$WORK_DIR" pull --ff-only; then
         printf '❌ 拉取更新失败（若为公开发布前的旧克隆，因历史已重置，git pull --ff-only 会拒绝快进）。\n' >&2
