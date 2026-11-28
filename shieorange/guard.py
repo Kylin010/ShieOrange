@@ -30,7 +30,7 @@ from .llm import (
     validate_api_key,
     validate_model_name,
 )
-from .rules import evaluate_basic_rules, has_paid_collection_pitch
+from .rules import evaluate_basic_rules
 from .storage import GroupSettings, Storage
 from .xray import (
     MessageXRay,
@@ -2135,7 +2135,6 @@ class GuardEngine:
         used_vision = False
         used_basic_rules = False
         ai_failed = False
-        ai_is_spam = False
 
         if self.llm.is_configured:
             summary = xray.format_for_ai(
@@ -2170,7 +2169,6 @@ class GuardEngine:
                         verdict.cached_tokens,
                     )
                 raw_content_score = verdict.score
-                ai_is_spam = verdict.is_spam
                 verdict_reason = verdict.reason
                 used_vision = verdict.used_vision
             except Exception as exc:
@@ -2248,26 +2246,8 @@ class GuardEngine:
                 repeat_extra_ids = tracked_ids
                 repeat_note = f"（24h内第{hits}次重复发送，风险分升权至{eff}）"
 
-        gray_floor = max(60, gs.spam_score - 15)
-        would_ban = effective_score >= gs.spam_score
-        would_mute = gs.gray_zone_mute and effective_score >= gray_floor
-        # Older members without stored history can look new. Require independent
-        # promotion evidence before acting on a high AI score for a short opener.
-        needs_manual_review = (
-            first_message_only
-            and not used_basic_rules
-            and (would_ban or would_mute)
-            and 0 < len(xray.normalized_text.strip()) <= SHORT_CHAT_LENGTH
-            and not xray.has_risk_signal(include_sender_chat=False)
-            and not any("引流" in flag for flag in profile_flags)
-            and (
-                pure_rule_verdict or evaluate_basic_rules(xray, {}, pure_content_only=True)
-            ).score <= 50
-            and not (would_ban and ai_is_spam and has_paid_collection_pitch(xray, profile))
-        )
-
         # ---- Graduated Enforcement (strictly per-person judgment!) ----
-        if would_ban and not needs_manual_review:
+        if effective_score >= gs.spam_score:
             # Shared same-group spam_cache ONLY accepts strictly pure standalone content verdicts
             # (never contaminated by another member's profile/bio/fragments/chat context!).
             if not gs.dry_run and msg_fp and allow_cache:
@@ -2355,7 +2335,8 @@ class GuardEngine:
                 )
             return
 
-        if would_mute and not needs_manual_review:
+        gray_floor = max(60, gs.spam_score - 15)
+        if gs.gray_zone_mute and effective_score >= gray_floor:
             await self.enforce_action(
                 context.bot,
                 msg,
@@ -2376,7 +2357,6 @@ class GuardEngine:
                 if is_channel_speaker
                 else (profile.get("full_name") or (user.full_name if user else "未知"))
             )
-            review_note = "（首条短句缺少独立广告证据，仅记录供复核）" if needs_manual_review else ""
             self.storage.log_action(
                 chat_id=msg.chat.id,
                 user_id=None if is_channel_speaker else actor_id,
@@ -2384,14 +2364,14 @@ class GuardEngine:
                 display_name=str(suspect_name),
                 trigger_type="ai_suspect",
                 score=effective_score,
-                reason=f"{verdict_reason}{profile_note}{repeat_note}{review_note}",
+                reason=f"{verdict_reason}{profile_note}{repeat_note}",
                 preview=xray.build_preview(),
                 dry_run=True,
             )
 
-        # Preserve clean counts for messages with a usable verdict and no pending review.
+        # Preserve clean counts only when the review did not fail.
         self.record_user_fragment(msg.chat.id, actor_id, msg.message_id, xray.normalized_text)
-        if user and not is_channel_speaker and not ai_failed and not needs_manual_review:
+        if user and not is_channel_speaker and not ai_failed:
             self.storage.increment_clean_count(msg.chat.id, user.id)
         self.record_clean_context(msg)
 

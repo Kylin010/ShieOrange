@@ -308,7 +308,7 @@ class MessageXRay:
         """Replies to another group message (including stickers/captionless media) never populate or hit shared spam cache."""
         return not self.is_reply
 
-    def has_risk_signal(self, *, include_sender_chat: bool = True) -> bool:
+    def has_risk_signal(self) -> bool:
         return bool(
             self.is_edited
             or self.obfuscation_flags
@@ -318,7 +318,7 @@ class MessageXRay:
             or self.via_bot
             or self.external_reply
             or self.forward_from
-            or (include_sender_chat and self.sender_chat)
+            or self.sender_chat
             or self.poll_info
             or self.special_payload
             or self.dangerous_filename

@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .xray import MessageXRay, normalize_and_detect_obfuscation
+from .xray import MessageXRay
 
 # Tier A: Explicit commercial solicitation / recruitment pitches (inherently promotional)
 _PROMO_HARD_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
@@ -111,33 +111,6 @@ _FUNNEL_RE = re.compile(
 
 # Private Telegram invite links hidden inside text_link / buttons / URLs
 _TG_INVITE_RE = re.compile(r"(t\.me/\+|t\.me/joinchat/|telegram\.me/\+|tg://join)", re.IGNORECASE)
-
-_COLLECTION_RECRUITMENT_RE = re.compile(
-    r"^(?:(?:替我|帮我|找人)(?:代收|收米|收款)|招(?:募|聘)?(?:代收|跑分))"
-    r"(?=$|[\s,，。！!：:]|日赚|日入|日结|一天|每天)"
-)
-_DAILY_PAYOUT_RE = re.compile(
-    r"(?:日赚|日入|日结|一天(?:赚|收入)?|每天(?:赚|收入)?)\s*[¥￥]?\s*"
-    r"(?:[1-9][0-9o]{3,}|[1-9][0-9]*\s*[千万k]|[一二两三四五六七八九十]+[千万])",
-    re.IGNORECASE,
-)
-_PROFILE_GROUP_INVITE_RE = re.compile(r"加群|进群|入群|\b(?:t\.me|telegram\.me)/", re.IGNORECASE)
-
-
-def has_paid_collection_pitch(xray: MessageXRay, profile: dict[str, Any]) -> bool:
-    """Corroborate a direct recruitment pitch for the short-message safeguard."""
-    text = (xray.normalized_text or xray.text).strip()
-    if not _COLLECTION_RECRUITMENT_RE.match(text) or _ANTI_SCAM_RE.search(text):
-        return False
-    if _DAILY_PAYOUT_RE.search(text):
-        return True
-    bio, _ = normalize_and_detect_obfuscation(str(profile.get("bio") or ""))
-    return bool(
-        _DAILY_PAYOUT_RE.search(bio)
-        and _PROFILE_GROUP_INVITE_RE.search(bio)
-        and not _ANTI_SCAM_RE.search(bio)
-    )
-
 
 @dataclass
 class BasicRuleVerdict:

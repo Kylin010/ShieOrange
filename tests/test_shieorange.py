@@ -2707,12 +2707,14 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             bot.ban_chat_member.assert_awaited_once_with(-1001, 500, revoke_messages=True)
             llm.classify.assert_not_awaited()
 
-    async def test_high_ai_score_on_untracked_members_short_joke_only_logs_suspicion(self) -> None:
+    async def test_plain_start_and_normal_first_messages_are_not_punished(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, Storage(str(Path(tmp) / "moderation.db")) as db:
             cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
             llm = UniversalAIClient("sk-test", "https://example.com/v1", "test-model")
             self.addAsyncCleanup(llm.close)
-            llm.classify = AsyncMock(return_value=SpamVerdict(True, 98, "模型认为是广告"))
+            normal = SpamVerdict(False, 5, "正常玩笑")
+            spam = SpamVerdict(True, 98, "明确招揽广告")
+            llm.classify = AsyncMock(return_value=normal)
             eng = GuardEngine(cfg, db, llm)
             gs = eng.get_group_settings(-1001)
             gs.cas_enabled = False
@@ -2743,16 +2745,16 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             bot.delete_message.assert_not_awaited()
             bot.ban_chat_member.assert_not_awaited()
             bot.restrict_chat_member.assert_not_awaited()
-            _, suspects = db.get_recent_suspects()
-            self.assertEqual(suspects[0]["score"], 98)
-            self.assertIn("仅记录供复核", suspects[0]["reason"])
+            self.assertEqual(db.get_recent_suspects()[0], 0)
 
             ad = _fake_msg(msg_id=11, user_id=501, text="招代发，预付开工")
+            llm.classify.return_value = spam
             await eng.handle_message(SimpleNamespace(edited_message=None, message=ad), ctx)
             bot.ban_chat_member.assert_awaited_once_with(-1001, 501, revoke_messages=True)
 
             bot.delete_message.reset_mock()
             llm.classify.reset_mock()
+            llm.classify.return_value = normal
             channel = SimpleNamespace(id=-10010, title="Test channel", username="test_channel")
             channel_joke = _fake_msg(msg_id=12, user_id=0, text=joke.text, sender_chat=channel)
             channel_reply = _fake_msg(msg_id=13, user_id=0, text="继续聊天", sender_chat=channel)
@@ -2760,12 +2762,12 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
                 await eng.handle_message(SimpleNamespace(edited_message=None, message=message), ctx)
             llm.classify.assert_awaited_once()
             bot.delete_message.assert_not_awaited()
-            _, suspects = db.get_recent_suspects()
-            self.assertEqual(suspects[0]["sender_chat_id"], channel.id)
+            self.assertEqual(db.get_recent_suspects()[0], 0)
 
             other_channel = SimpleNamespace(id=-10020, title="Test ads", username="test_ads")
             channel_ad = _fake_msg(msg_id=14, user_id=0, text=ad.text, sender_chat=other_channel)
             bot.ban_chat_sender_chat = AsyncMock()
+            llm.classify.return_value = spam
             await eng.handle_message(SimpleNamespace(edited_message=None, message=channel_ad), ctx)
             bot.delete_message.assert_awaited_once_with(-1001, 14)
             bot.ban_chat_sender_chat.assert_not_awaited()
@@ -2773,14 +2775,17 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(suspects[0]["trigger_type"], "channel_review")
 
     async def test_first_message_collection_ads_are_removed_without_reviewing_followups(self) -> None:
+        spam = SpamVerdict(True, 98, "明确招揽广告")
+        normal = SpamVerdict(False, 5, "正常交流")
         cases = (
-            ("替我收米 日赚9000", "加群项目 日入6ooo", True, True),
-            ("招代收 一天9ooo", "", True, True),
-            ("替我收米", "加群项目 日入6ooo", True, True),
-            ("胆大来洗米", "看看我的技术频道 https://t.me/example", True, False),
-            ("替我收米 日赚9000是骗局，别信", "", True, False),
-            ("帮我收款 日结150元", "", True, False),
-            ("替我收米 日赚9000", "", False, False),
+            ("微信帮收款 赚一万", "加群看项目 一天7ooo", spam),
+            ("微信帮收款 赚一万", "加群看项目 日赚7千", spam),
+            ("微信帮收款 赚一万", "加群看项目", spam),
+            ("替我收米 日赚9000", "加群项目 日入6ooo", spam),
+            ("招代收 一天9ooo", "", spam),
+            ("胆大来洗米", "看看我的技术频道 https://t.me/example", normal),
+            ("替我收米 日赚9000是骗局，别信", "", normal),
+            ("帮我收款 日结150元", "", normal),
         )
         with tempfile.TemporaryDirectory() as tmp, Storage(str(Path(tmp) / "moderation.db")) as db:
             cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
@@ -2789,6 +2794,7 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             llm.classify = AsyncMock()
             eng = GuardEngine(cfg, db, llm)
             gs = eng.get_group_settings(-1001)
+            gs.spam_score = 85
             gs.cas_enabled = False
             gs.announce_in_group = False
             db.save_group(gs)
@@ -2803,10 +2809,10 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             )
             ctx = SimpleNamespace(bot=bot)
 
-            for index, (text, bio, ai_spam, should_ban) in enumerate(cases):
-                with self.subTest(text=text, bio=bio, ai_spam=ai_spam):
-                    llm.classify.reset_mock(return_value=True)
-                    llm.classify.return_value = SpamVerdict(ai_spam, 98, "模拟首审结果")
+            for index, (text, bio, verdict) in enumerate(cases):
+                with self.subTest(text=text, bio=bio):
+                    llm.classify.reset_mock()
+                    llm.classify.return_value = verdict
                     bot.get_chat.return_value = SimpleNamespace(photo=object(), bio=bio, personal_chat=None)
                     bot.delete_message.reset_mock()
                     bot.ban_chat_member.reset_mock()
@@ -2814,14 +2820,15 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
                     user_id = 500 + index
                     first_id = 2 * index + 1
                     first = _fake_msg(msg_id=first_id, user_id=user_id, text=text)
-                    followup = _fake_msg(msg_id=first_id + 1, user_id=user_id, text="后续消息")
+                    followup = _fake_msg(msg_id=first_id + 1, user_id=user_id, text="微信帮收款 赚一万")
 
                     await eng.handle_message(SimpleNamespace(edited_message=None, message=first), ctx)
+                    llm.classify.return_value = spam
                     await eng.handle_message(SimpleNamespace(edited_message=None, message=followup), ctx)
 
                     llm.classify.assert_awaited_once()
                     bot.restrict_chat_member.assert_not_awaited()
-                    if should_ban:
+                    if verdict.is_spam:
                         bot.delete_message.assert_awaited_once_with(-1001, first_id)
                         bot.ban_chat_member.assert_awaited_once_with(-1001, user_id, revoke_messages=True)
                     else:
