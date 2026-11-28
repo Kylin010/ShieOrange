@@ -2772,6 +2772,62 @@ class TestFirstMessageReview(unittest.IsolatedAsyncioTestCase):
             _, suspects = db.get_recent_suspects()
             self.assertEqual(suspects[0]["trigger_type"], "channel_review")
 
+    async def test_first_message_collection_ads_are_removed_without_reviewing_followups(self) -> None:
+        cases = (
+            ("替我收米 日赚9000", "加群项目 日入6ooo", True, True),
+            ("招代收 一天9ooo", "", True, True),
+            ("替我收米", "加群项目 日入6ooo", True, True),
+            ("胆大来洗米", "看看我的技术频道 https://t.me/example", True, False),
+            ("替我收米 日赚9000是骗局，别信", "", True, False),
+            ("帮我收款 日结150元", "", True, False),
+            ("替我收米 日赚9000", "", False, False),
+        )
+        with tempfile.TemporaryDirectory() as tmp, Storage(str(Path(tmp) / "moderation.db")) as db:
+            cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
+            llm = UniversalAIClient("sk-test", "https://example.com/v1", "test-model")
+            self.addAsyncCleanup(llm.close)
+            llm.classify = AsyncMock()
+            eng = GuardEngine(cfg, db, llm)
+            gs = eng.get_group_settings(-1001)
+            gs.cas_enabled = False
+            gs.announce_in_group = False
+            db.save_group(gs)
+            bot = SimpleNamespace(
+                id=1,
+                get_chat_administrators=AsyncMock(return_value=[]),
+                get_chat=AsyncMock(),
+                delete_message=AsyncMock(),
+                ban_chat_member=AsyncMock(),
+                restrict_chat_member=AsyncMock(),
+                send_message=AsyncMock(),
+            )
+            ctx = SimpleNamespace(bot=bot)
+
+            for index, (text, bio, ai_spam, should_ban) in enumerate(cases):
+                with self.subTest(text=text, bio=bio, ai_spam=ai_spam):
+                    llm.classify.reset_mock(return_value=True)
+                    llm.classify.return_value = SpamVerdict(ai_spam, 98, "模拟首审结果")
+                    bot.get_chat.return_value = SimpleNamespace(photo=object(), bio=bio, personal_chat=None)
+                    bot.delete_message.reset_mock()
+                    bot.ban_chat_member.reset_mock()
+                    bot.restrict_chat_member.reset_mock()
+                    user_id = 500 + index
+                    first_id = 2 * index + 1
+                    first = _fake_msg(msg_id=first_id, user_id=user_id, text=text)
+                    followup = _fake_msg(msg_id=first_id + 1, user_id=user_id, text="后续消息")
+
+                    await eng.handle_message(SimpleNamespace(edited_message=None, message=first), ctx)
+                    await eng.handle_message(SimpleNamespace(edited_message=None, message=followup), ctx)
+
+                    llm.classify.assert_awaited_once()
+                    bot.restrict_chat_member.assert_not_awaited()
+                    if should_ban:
+                        bot.delete_message.assert_awaited_once_with(-1001, first_id)
+                        bot.ban_chat_member.assert_awaited_once_with(-1001, user_id, revoke_messages=True)
+                    else:
+                        bot.delete_message.assert_not_awaited()
+                        bot.ban_chat_member.assert_not_awaited()
+
     async def test_first_review_is_per_group_and_survives_concurrency_failure_and_restart(self) -> None:
         cfg = AppConfig(telegram_bot_token="t", ai_api_key="sk-test", owner_ids={999})
         llm = UniversalAIClient("sk-test", "https://example.com/v1", "test-model")

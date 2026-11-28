@@ -30,7 +30,7 @@ from .llm import (
     validate_api_key,
     validate_model_name,
 )
-from .rules import evaluate_basic_rules
+from .rules import evaluate_basic_rules, has_paid_collection_pitch
 from .storage import GroupSettings, Storage
 from .xray import (
     MessageXRay,
@@ -2135,6 +2135,7 @@ class GuardEngine:
         used_vision = False
         used_basic_rules = False
         ai_failed = False
+        ai_is_spam = False
 
         if self.llm.is_configured:
             summary = xray.format_for_ai(
@@ -2169,6 +2170,7 @@ class GuardEngine:
                         verdict.cached_tokens,
                     )
                 raw_content_score = verdict.score
+                ai_is_spam = verdict.is_spam
                 verdict_reason = verdict.reason
                 used_vision = verdict.used_vision
             except Exception as exc:
@@ -2261,6 +2263,7 @@ class GuardEngine:
             and (
                 pure_rule_verdict or evaluate_basic_rules(xray, {}, pure_content_only=True)
             ).score <= 50
+            and not (would_ban and ai_is_spam and has_paid_collection_pitch(xray, profile))
         )
 
         # ---- Graduated Enforcement (strictly per-person judgment!) ----
